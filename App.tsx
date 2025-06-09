@@ -1,5 +1,4 @@
-// App.js - 更新版完整单文件，整合所有功能改进
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -24,19 +23,98 @@ import BackgroundTimer from 'react-native-background-timer';
 const { width, height } = Dimensions.get('window');
 
 // ============================================================================
-// 🧠 增强的时间管理类
+// 🎯 TypeScript 类型定义
+// ============================================================================
+
+interface TimeBlock {
+  id: string;
+  name: string;
+  duration: number;
+  icon?: string;
+  color: string;
+  children?: TimeBlock[];
+  consumedTime?: number;
+  type?: 'active' | 'rest';
+  isTemporary?: boolean;
+}
+
+interface Session {
+  id: string;
+  name: string;
+  duration: number;
+  remainingTime: number;
+  totalUsedTime: number;
+  totalPauseTime: number;
+  isActive: boolean;
+  lastStartTime: number | null;
+  pauseStartTime: number | null;
+  pauseHistory: Array<{
+    duration: number;
+    timestamp: Date;
+    targetBlock?: string;
+  }>;
+  currentPauseTarget: TimeBlock | null;
+  accumulatedTime: number;
+  icon?: string;
+  color: string;
+}
+
+interface ActivityLog {
+  id: string;
+  timestamp: Date;
+  type: 'start' | 'pause' | 'switch' | 'complete' | 'pause_end' | 'major_block_consume';
+  description: string;
+  remainingTime: number;
+  duration: number;
+  majorBlocksStatus: Array<{
+    id: string;
+    name: string;
+    remaining: number;
+    progressPercent: number;
+  }>;
+}
+
+interface AppSettings {
+  countDirection: 'up' | 'down';
+  showSeconds: boolean;
+  updateInterval: number;
+  autoCollapse: boolean;
+  showMajorBlocks: boolean;
+  focusMode: boolean;
+  soundEnabled: boolean;
+  vibrationEnabled: boolean;
+  autoRedistribute: boolean;
+  theme: 'light' | 'dark' | 'auto';
+  defaultPauseDestination: string | null;
+  vibrationPattern: 'light' | 'medium' | 'strong';
+  soundType: 'beep' | 'chime' | 'notification';
+}
+
+interface DayTemplate {
+  name: string;
+  majorBlocks: TimeBlock[];
+  subBlocks: Array<TimeBlock & { parentId: string }>;
+}
+
+interface VibrationPatterns {
+  start: number[];
+  pause: number[];
+  complete: number[];
+  switch: number[];
+}
+
+// ============================================================================
+// 🧠 增强的时间管理类（修复版）
 // ============================================================================
 
 class DayTimeManager {
-  constructor() {
-    this.sessions = new Map();
-    this.activityLog = [];
-    this.majorBlocks = [];
-    this.pauseDestinationBlock = null;
-    this.collapseStates = new Map();
-  }
+  private sessions = new Map<string, Session>();
+  private activityLog: ActivityLog[] = [];
+  private majorBlocks: TimeBlock[] = [];
+  private pauseDestinationBlock: TimeBlock | null = null;
+  private collapseStates = new Map<string, boolean>();
 
-  setMajorBlocks(blocks) {
+  setMajorBlocks(blocks: TimeBlock[]): void {
     this.majorBlocks = blocks.map(block => ({
       ...block,
       consumedTime: block.consumedTime || 0,
@@ -46,10 +124,10 @@ class DayTimeManager {
       block.type === 'rest' || 
       block.name.includes('休息') || 
       block.name.includes('睡眠')
-    ) || this.majorBlocks[1];
+    ) || this.majorBlocks[1] || null;
   }
 
-  initializeSession(block) {
+  initializeSession(block: TimeBlock): Session {
     if (!this.sessions.has(block.id)) {
       this.sessions.set(block.id, {
         ...block,
@@ -61,13 +139,13 @@ class DayTimeManager {
         pauseStartTime: null,
         pauseHistory: [],
         currentPauseTarget: null,
-        accumulatedTime: 0, // 累计已用时间
+        accumulatedTime: 0,
       });
     }
-    return this.sessions.get(block.id);
+    return this.sessions.get(block.id)!;
   }
 
-  startSession(blockId) {
+  startSession(blockId: string): Session | null {
     const session = this.sessions.get(blockId);
     if (session) {
       session.isActive = true;
@@ -83,17 +161,20 @@ class DayTimeManager {
     return null;
   }
 
-  pauseSession(blockId, destinationBlockId = null) {
+  // 修复：使用秒为单位提高精度
+  pauseSession(blockId: string, destinationBlockId?: string): { session: Session; activeTime: number; targetBlock: TimeBlock | null } | null {
     const session = this.sessions.get(blockId);
-    if (!session || !session.isActive) return null;
+    if (!session || !session.isActive || !session.lastStartTime) return null;
 
     const pauseStartTime = Date.now();
-    const activeTime = Math.floor((pauseStartTime - session.lastStartTime) / 60000);
+    const activeTimeMs = pauseStartTime - session.lastStartTime;
+    const activeTimeSeconds = Math.floor(activeTimeMs / 1000);
+    const activeTimeMinutes = Math.floor(activeTimeSeconds / 60);
     
-    // 更新累计时间
-    session.accumulatedTime += activeTime;
-    session.remainingTime = Math.max(0, session.remainingTime - activeTime);
-    session.totalUsedTime += activeTime;
+    // 更新累计时间（保持分钟精度用于显示）
+    session.accumulatedTime += activeTimeMinutes;
+    session.remainingTime = Math.max(0, session.remainingTime - activeTimeMinutes);
+    session.totalUsedTime += activeTimeMinutes;
     session.isActive = false;
     session.pauseStartTime = pauseStartTime;
     
@@ -104,45 +185,46 @@ class DayTimeManager {
     session.currentPauseTarget = targetBlock;
     
     this.logActivity('pause', 
-      `暂停 ${session.name}，时间将计入 ${targetBlock?.name}`, 
+      `暂停 ${session.name}，时间将计入 ${targetBlock?.name || '未知'}`, 
       session.remainingTime, 
-      activeTime
+      activeTimeMinutes
     );
     
-    return { session, activeTime, targetBlock };
+    return { session, activeTime: activeTimeMinutes, targetBlock };
   }
 
-  endPauseTime(blockId) {
+  endPauseTime(blockId: string): number {
     const session = this.sessions.get(blockId);
     if (!session || !session.pauseStartTime) return 0;
 
-    const pauseDuration = Math.floor((Date.now() - session.pauseStartTime) / 60000);
+    const pauseDurationMs = Date.now() - session.pauseStartTime;
+    const pauseDurationMinutes = Math.floor(pauseDurationMs / (60 * 1000));
     const targetBlock = session.currentPauseTarget;
     
-    session.totalPauseTime += pauseDuration;
+    session.totalPauseTime += pauseDurationMinutes;
     session.pauseStartTime = null;
     session.currentPauseTarget = null;
     
     if (targetBlock) {
-      this.consumeMajorBlockTime(targetBlock.id, pauseDuration);
+      this.consumeMajorBlockTime(targetBlock.id, pauseDurationMinutes);
     }
     
     session.pauseHistory.push({
-      duration: pauseDuration,
+      duration: pauseDurationMinutes,
       timestamp: new Date(),
       targetBlock: targetBlock?.name,
     });
     
     this.logActivity('pause_end', 
-      `结束暂停，暂停了 ${pauseDuration} 分钟，计入 ${targetBlock?.name}`,
+      `结束暂停，暂停了 ${pauseDurationMinutes} 分钟，计入 ${targetBlock?.name || '未知'}`,
       0, 
-      pauseDuration
+      pauseDurationMinutes
     );
     
-    return pauseDuration;
+    return pauseDurationMinutes;
   }
 
-  consumeMajorBlockTime(blockId, minutes) {
+  consumeMajorBlockTime(blockId: string, minutes: number): void {
     const majorBlock = this.majorBlocks.find(block => block.id === blockId);
     if (majorBlock) {
       majorBlock.consumedTime = (majorBlock.consumedTime || 0) + minutes;
@@ -155,7 +237,10 @@ class DayTimeManager {
     }
   }
 
-  switchToSession(fromBlockId, toBlockId, pauseDestination = null) {
+  switchToSession(fromBlockId: string | null, toBlockId: string, pauseDestination?: string): { 
+    pauseResult: { session: Session; activeTime: number; targetBlock: TimeBlock | null } | null;
+    newSession: Session | null;
+  } {
     let pauseResult = null;
     
     if (fromBlockId) {
@@ -165,73 +250,74 @@ class DayTimeManager {
     const newSession = this.startSession(toBlockId);
     
     this.logActivity('switch', 
-      `从 ${this.sessions.get(fromBlockId)?.name || '无'} 切换到 ${newSession?.name}`,
-      newSession?.remainingTime
+      `从 ${this.sessions.get(fromBlockId || '')?.name || '无'} 切换到 ${newSession?.name || '未知'}`,
+      newSession?.remainingTime || 0
     );
     
     return { pauseResult, newSession };
   }
 
-  // 删除时间块后重新分配时间
-  redistributeTimeAfterDeletion(parentId, deletedDuration) {
-    const parent = this.majorBlocks.find(b => b.id === parentId);
-    if (!parent || !parent.children || parent.children.length === 0) return;
-
-    const remainingChildren = parent.children;
-    const totalCurrentTime = remainingChildren.reduce((sum, child) => sum + child.duration, 0);
-    
-    if (totalCurrentTime > 0) {
-      remainingChildren.forEach(child => {
-        const proportion = child.duration / totalCurrentTime;
-        const additionalTime = Math.floor(deletedDuration * proportion);
-        child.duration += additionalTime;
-        
-        // 更新session中的剩余时间
-        const session = this.sessions.get(child.id);
-        if (session) {
-          session.remainingTime += additionalTime;
-        }
-      });
-    }
-  }
-
-  getCurrentPauseTime(blockId) {
+  // 修复：提高时间计算精度，支持秒级显示
+  getCurrentPauseTime(blockId: string): { minutes: number; seconds: number } {
     const session = this.sessions.get(blockId);
     if (session && session.pauseStartTime) {
-      return Math.floor((Date.now() - session.pauseStartTime) / 60000);
+      const pauseMs = Date.now() - session.pauseStartTime;
+      const totalSeconds = Math.floor(pauseMs / 1000);
+      return {
+        minutes: Math.floor(totalSeconds / 60),
+        seconds: totalSeconds % 60
+      };
     }
-    return 0;
+    return { minutes: 0, seconds: 0 };
   }
 
-  getCurrentElapsedTime(blockId) {
+  getCurrentElapsedTime(blockId: string): { minutes: number; seconds: number } {
     const session = this.sessions.get(blockId);
     if (session && session.isActive && session.lastStartTime) {
-      const currentElapsed = Math.floor((Date.now() - session.lastStartTime) / 60000);
-      return session.accumulatedTime + currentElapsed;
+      const currentElapsedMs = Date.now() - session.lastStartTime;
+      const currentElapsedSeconds = Math.floor(currentElapsedMs / 1000);
+      const totalSeconds = session.accumulatedTime * 60 + currentElapsedSeconds;
+      return {
+        minutes: Math.floor(totalSeconds / 60),
+        seconds: totalSeconds % 60
+      };
     }
-    return session ? session.accumulatedTime : 0;
+    return {
+      minutes: session ? session.accumulatedTime : 0,
+      seconds: 0
+    };
   }
 
-  getCurrentRemainingTime(blockId) {
+  getCurrentRemainingTime(blockId: string): { minutes: number; seconds: number } {
     const session = this.sessions.get(blockId);
     if (session && session.isActive && session.lastStartTime) {
-      const currentElapsed = Math.floor((Date.now() - session.lastStartTime) / 60000);
-      return Math.max(0, session.remainingTime - currentElapsed);
+      const currentElapsedMs = Date.now() - session.lastStartTime;
+      const currentElapsedMinutes = Math.floor(currentElapsedMs / (60 * 1000));
+      const currentElapsedSeconds = Math.floor((currentElapsedMs % (60 * 1000)) / 1000);
+      const remainingTotalSeconds = Math.max(0, session.remainingTime * 60 - (currentElapsedMinutes * 60 + currentElapsedSeconds));
+      return {
+        minutes: Math.floor(remainingTotalSeconds / 60),
+        seconds: remainingTotalSeconds % 60
+      };
     }
-    return session ? session.remainingTime : 0;
+    return {
+      minutes: session ? session.remainingTime : 0,
+      seconds: 0
+    };
   }
 
-  getMajorBlocksStatus() {
+  getMajorBlocksStatus(): Array<{ id: string; name: string; remaining: number; progressPercent: number }> {
     return this.majorBlocks.map(block => ({
-      ...block,
+      id: block.id,
+      name: block.name,
       remaining: block.duration - (block.consumedTime || 0),
       progressPercent: ((block.consumedTime || 0) / block.duration) * 100
     }));
   }
 
-  logActivity(type, description, remainingTime = 0, duration = 0) {
-    const activity = {
-      id: Date.now() + Math.random(),
+  logActivity(type: ActivityLog['type'], description: string, remainingTime = 0, duration = 0): void {
+    const activity: ActivityLog = {
+      id: `${Date.now()}_${Math.random()}`,
       timestamp: new Date(),
       type,
       description,
@@ -242,27 +328,31 @@ class DayTimeManager {
     
     this.activityLog.push(activity);
     
+    // 保留24小时内的记录
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
     this.activityLog = this.activityLog.filter(log => log.timestamp.getTime() > oneDayAgo);
   }
 
-  resetSession(blockId) {
+  resetSession(blockId: string): void {
     const session = this.sessions.get(blockId);
     if (session) {
-      session.remainingTime = session.duration;
-      session.totalUsedTime = 0;
-      session.totalPauseTime = 0;
-      session.isActive = false;
-      session.lastStartTime = null;
-      session.pauseStartTime = null;
-      session.pauseHistory = [];
-      session.currentPauseTarget = null;
-      session.accumulatedTime = 0;
+      const originalDuration = session.duration;
+      Object.assign(session, {
+        remainingTime: originalDuration,
+        totalUsedTime: 0,
+        totalPauseTime: 0,
+        isActive: false,
+        lastStartTime: null,
+        pauseStartTime: null,
+        pauseHistory: [],
+        currentPauseTarget: null,
+        accumulatedTime: 0,
+      });
     }
   }
 
-  getActivityLog() {
-    return this.activityLog.slice().reverse();
+  getActivityLog(): ActivityLog[] {
+    return [...this.activityLog].reverse();
   }
 
   getDailyStats() {
@@ -291,32 +381,46 @@ class DayTimeManager {
     };
   }
 
-  // 折叠状态管理
-  setCollapseState(parentId, isCollapsed) {
+  setCollapseState(parentId: string, isCollapsed: boolean): void {
     this.collapseStates.set(parentId, isCollapsed);
   }
 
-  getCollapseState(parentId) {
+  getCollapseState(parentId: string): boolean {
     return this.collapseStates.get(parentId) || false;
   }
 }
 
 // ============================================================================
-// 🔔 增强的通知管理器
+// 🔔 增强的通知管理器（修复版）
 // ============================================================================
 
 class NotificationManager {
-  constructor() {
-    this.configure();
-    this.vibrationPatterns = {
+  private vibrationPatterns: Record<string, Record<string, number[]>> = {
+    light: {
+      start: [50, 25, 50],
+      pause: [100, 50, 100],
+      complete: [500, 250, 500],
+      switch: [50, 25, 50, 25, 50],
+    },
+    medium: {
       start: [100, 50, 100],
       pause: [200, 100, 200],
       complete: [1000, 500, 1000, 500, 1000],
       switch: [100, 50, 100, 50, 100],
-    };
+    },
+    strong: {
+      start: [200, 100, 200],
+      pause: [400, 200, 400],
+      complete: [1500, 750, 1500, 750, 1500],
+      switch: [200, 100, 200, 100, 200],
+    }
+  };
+
+  constructor() {
+    this.configure();
   }
 
-  configure() {
+  private configure(): void {
     PushNotification.configure({
       onRegister: (token) => console.log('通知令牌:', token),
       onNotification: (notification) => console.log('收到通知:', notification),
@@ -340,12 +444,27 @@ class NotificationManager {
     });
   }
 
-  vibrate(type = 'start') {
-    const pattern = this.vibrationPatterns[type] || this.vibrationPatterns.start;
-    Vibration.vibrate(pattern);
+  vibrate(type: string = 'start', pattern: string = 'medium'): void {
+    const vibrationPattern = this.vibrationPatterns[pattern]?.[type] || this.vibrationPatterns.medium[type];
+    if (Platform.OS === 'android') {
+      Vibration.vibrate(vibrationPattern);
+    } else {
+      Vibration.vibrate();
+    }
   }
 
-  scheduleBlockEnd(blockName, endTime, blockId) {
+  playSound(type: string = 'chime'): void {
+    // 使用系统声音API
+    if (Platform.OS === 'android') {
+      // Android上使用默认通知声音
+      this.sendImmediateNotification('', '', false);
+    } else {
+      // iOS上使用震动作为声音反馈
+      Vibration.vibrate();
+    }
+  }
+
+  scheduleBlockEnd(blockName: string, endTime: number, blockId: string): string {
     const notificationId = `block_end_${blockId}`;
     
     PushNotification.localNotificationSchedule({
@@ -363,39 +482,61 @@ class NotificationManager {
     return notificationId;
   }
 
-  sendImmediateNotification(title, message) {
-    PushNotification.localNotification({
-      title,
-      message,
-      channelId: "time-blocks",
-      vibrate: true,
-      vibration: 300,
-      playSound: true,
-      soundName: 'default',
-    });
+  sendImmediateNotification(title: string, message: string, showNotification: boolean = true): void {
+    if (showNotification) {
+      PushNotification.localNotification({
+        title,
+        message,
+        channelId: "time-blocks",
+        vibrate: true,
+        vibration: 300,
+        playSound: true,
+        soundName: 'default',
+      });
+    } else {
+      // 只播放声音，不显示通知
+      PushNotification.localNotification({
+        title: '',
+        message: '',
+        channelId: "time-blocks",
+        vibrate: false,
+        playSound: true,
+        soundName: 'default',
+        ongoing: false,
+        autoCancel: true,
+      });
+    }
   }
 
-  cancelNotification(notificationId) {
-    PushNotification.cancelLocalNotifications({ id: notificationId.toString() });
+  cancelNotification(notificationId: string): void {
+    PushNotification.cancelLocalNotifications({ id: notificationId });
   }
 }
 
 // ============================================================================
-// 🎨 主应用组件
+// 🎨 主应用组件（修复版）
 // ============================================================================
 
-const App = () => {
+const App: React.FC = () => {
   // 状态管理
-  const [timeBlocks, setTimeBlocks] = useState([]);
-  const [majorBlocks, setMajorBlocks] = useState([]);
-  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [timeBlocks, setTimeBlocks] = useState<TimeBlock[]>([]);
+  const [majorBlocks, setMajorBlocks] = useState<TimeBlock[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   
+  // 修复：添加forceUpdate来正确触发重新渲染
+  const [, setForceUpdate] = useState({});
+  const forceUpdate = useCallback(() => setForceUpdate({}), []);
+  
+  // 主题状态
+  const [currentTheme, setCurrentTheme] = useState<'light' | 'dark'>('dark');
+  const [currentSeconds, setCurrentSeconds] = useState(0); // 添加秒数状态
+  
   // 模态框状态
   const [modalVisible, setModalVisible] = useState(false);
-  const [modalType, setModalType] = useState(null);
-  const [editingBlock, setEditingBlock] = useState(null);
+  const [modalType, setModalType] = useState<string | null>(null);
+  const [editingBlock, setEditingBlock] = useState<{ parentId: string } | null>(null);
   const [pauseDestinationSelection, setPauseDestinationSelection] = useState(false);
   
   // 显示状态
@@ -406,72 +547,76 @@ const App = () => {
   const [isFirstTime, setIsFirstTime] = useState(true);
 
   // 应用设置
-  const [appSettings, setAppSettings] = useState({
-    countDirection: 'down', // 'up' | 'down'
-    showSeconds: false,
-    updateInterval: 1, // 秒
+  const [appSettings, setAppSettings] = useState<AppSettings>({
+    countDirection: 'down',
+    showSeconds: true, // 默认显示秒数
+    updateInterval: 1,
     autoCollapse: true,
-    showMajorBlocks: false, // 默认隐藏24小时分配
+    showMajorBlocks: false,
     focusMode: true,
     soundEnabled: true,
     vibrationEnabled: true,
     autoRedistribute: true,
+    theme: 'auto',
+    defaultPauseDestination: null,
+    vibrationPattern: 'medium',
+    soundType: 'chime',
   });
 
   // 新建时间块状态
   const [newBlockName, setNewBlockName] = useState('');
   const [newBlockIcon, setNewBlockIcon] = useState('⭐');
-  const [newBlockColor, setNewBlockColor] = useState('#667eea');
+  const [newBlockColor, setNewBlockColor] = useState('#7C3AED');
   const [newBlockDuration, setNewBlockDuration] = useState(60);
 
   // 管理器实例
   const dayTimeManager = useRef(new DayTimeManager()).current;
   const notificationManager = useRef(new NotificationManager()).current;
-  const timerRef = useRef(null);
-  const displayTimerRef = useRef(null);
+  const timerRef = useRef<number | null>(null);
+  const displayTimerRef = useRef<number | null>(null);
 
-  // 默认24小时模板
-  const dayTemplates = [
+  // 默认24小时模板（修复颜色对比度）
+  const dayTemplates: DayTemplate[] = [
     {
       name: '工作日模板',
       majorBlocks: [
-        { id: 'awake', name: '清醒工作时间', duration: 16 * 60, type: 'active', color: '#4facfe' },
-        { id: 'rest', name: '休息睡眠时间', duration: 8 * 60, type: 'rest', color: '#43e97b' },
+        { id: 'awake', name: '清醒工作时间', duration: 16 * 60, type: 'active', color: '#00D4FF' },
+        { id: 'rest', name: '休息睡眠时间', duration: 8 * 60, type: 'rest', color: '#00FF88' },
       ],
       subBlocks: [
-        { parentId: 'awake', name: '专注学习1', duration: 240, icon: '📚', color: '#f093fb' },
-        { parentId: 'awake', name: '早餐时间', duration: 30, icon: '🥞', color: '#ffecd2' },
-        { parentId: 'awake', name: '专注学习2', duration: 240, icon: '📚', color: '#f093fb' },
-        { parentId: 'awake', name: '午餐时间', duration: 45, icon: '🍽️', color: '#ffecd2' },
-        { parentId: 'awake', name: '运动时间', duration: 60, icon: '🏃‍♂️', color: '#a8edea' },
-        { parentId: 'awake', name: '项目开发', duration: 180, icon: '💻', color: '#d299c2' },
-        { parentId: 'awake', name: '晚餐时间', duration: 45, icon: '🍽️', color: '#ffecd2' },
-        { parentId: 'awake', name: '自由时间', duration: 120, icon: '🎮', color: '#89f7fe' },
-        { parentId: 'rest', name: '夜间睡眠', duration: 420, icon: '🌙', color: '#667eea' },
-        { parentId: 'rest', name: '放松休息', duration: 60, icon: '🧘‍♂️', color: '#89f7fe' },
+        { parentId: 'awake', name: '专注学习1', duration: 240, icon: '📚', color: '#FF6B9D', id: 'study1' },
+        { parentId: 'awake', name: '早餐时间', duration: 30, icon: '🥞', color: '#FFE066', id: 'breakfast' },
+        { parentId: 'awake', name: '专注学习2', duration: 240, icon: '📚', color: '#FF6B9D', id: 'study2' },
+        { parentId: 'awake', name: '午餐时间', duration: 45, icon: '🍽️', color: '#FFE066', id: 'lunch' },
+        { parentId: 'awake', name: '运动时间', duration: 60, icon: '🏃‍♂️', color: '#00FFAA', id: 'exercise' },
+        { parentId: 'awake', name: '项目开发', duration: 180, icon: '💻', color: '#C77DFF', id: 'coding' },
+        { parentId: 'awake', name: '晚餐时间', duration: 45, icon: '🍽️', color: '#FFE066', id: 'dinner' },
+        { parentId: 'awake', name: '自由时间', duration: 120, icon: '🎮', color: '#00E4FF', id: 'free' },
+        { parentId: 'rest', name: '夜间睡眠', duration: 420, icon: '🌙', color: '#7C3AED', id: 'sleep' },
+        { parentId: 'rest', name: '放松休息', duration: 60, icon: '🧘‍♂️', color: '#00E4FF', id: 'relax' },
       ]
     },
     {
       name: '学习日模板',
       majorBlocks: [
-        { id: 'study', name: '学习专注时间', duration: 14 * 60, type: 'active', color: '#667eea' },
-        { id: 'life', name: '生活休息时间', duration: 10 * 60, type: 'rest', color: '#764ba2' },
+        { id: 'study', name: '学习专注时间', duration: 14 * 60, type: 'active', color: '#7C3AED' },
+        { id: 'life', name: '生活休息时间', duration: 10 * 60, type: 'rest', color: '#F59E0B' },
       ],
       subBlocks: [
-        { parentId: 'study', name: '数学学习', duration: 180, icon: '🔢', color: '#f093fb' },
-        { parentId: 'study', name: '编程练习', duration: 240, icon: '💻', color: '#4facfe' },
-        { parentId: 'study', name: '英语学习', duration: 120, icon: '🔤', color: '#43e97b' },
-        { parentId: 'study', name: '项目实践', duration: 300, icon: '🛠️', color: '#fa709a' },
-        { parentId: 'life', name: '睡眠时间', duration: 480, icon: '🌙', color: '#667eea' },
-        { parentId: 'life', name: '用餐休息', duration: 120, icon: '🍽️', color: '#ffecd2' },
+        { parentId: 'study', name: '数学学习', duration: 180, icon: '🔢', color: '#FF6B9D', id: 'math' },
+        { parentId: 'study', name: '编程练习', duration: 240, icon: '💻', color: '#00D4FF', id: 'programming' },
+        { parentId: 'study', name: '英语学习', duration: 120, icon: '🔤', color: '#00FF88', id: 'english' },
+        { parentId: 'study', name: '项目实践', duration: 300, icon: '🛠️', color: '#FF8C42', id: 'project' },
+        { parentId: 'life', name: '睡眠时间', duration: 480, icon: '🌙', color: '#7C3AED', id: 'sleep2' },
+        { parentId: 'life', name: '用餐休息', duration: 120, icon: '🍽️', color: '#FFE066', id: 'meals' },
       ]
     }
   ];
 
-  // 颜色和图标选项
+  // 颜色和图标选项（更清爽的颜色）
   const colorOptions = [
-    '#667eea', '#f093fb', '#ffecd2', '#a8edea', '#89f7fe',
-    '#d299c2', '#4facfe', '#43e97b', '#fa709a', '#fee140'
+    '#7C3AED', '#FF6B9D', '#FFE066', '#00FFAA', '#00E4FF',
+    '#C77DFF', '#00D4FF', '#00FF88', '#FF8C42', '#F59E0B'
   ];
 
   const emojiOptions = [
@@ -480,35 +625,54 @@ const App = () => {
   ];
 
   // ============================================================================
-  // 📱 生命周期和初始化
+  // 📱 生命周期和初始化（修复版）
   // ============================================================================
 
   useEffect(() => {
     initializeApp();
     return () => {
-      if (timerRef.current) BackgroundTimer.clearInterval(timerRef.current);
-      if (displayTimerRef.current) clearInterval(displayTimerRef.current);
+      // 修复：确保清理所有定时器
+      cleanupTimers();
     };
   }, []);
 
-  const initializeApp = async () => {
-    await loadSettings();
-    await loadConfiguration();
-    startTimers();
+  const cleanupTimers = useCallback(() => {
+    if (timerRef.current) {
+      BackgroundTimer.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (displayTimerRef.current) {
+      clearInterval(displayTimerRef.current);
+      displayTimerRef.current = null;
+    }
+  }, []);
+
+  const initializeApp = async (): Promise<void> => {
+    try {
+      await loadSettings();
+      await loadConfiguration();
+      startTimers();
+    } catch (error) {
+      console.error('应用初始化失败:', error);
+      // 修复：即使初始化失败也要设置为非首次使用，避免卡在加载状态
+      setIsFirstTime(false);
+      setShowMajorBlockSetup(true);
+    }
   };
 
-  const loadSettings = async () => {
+  const loadSettings = async (): Promise<void> => {
     try {
       const savedSettings = await AsyncStorage.getItem('appSettings');
       if (savedSettings) {
-        setAppSettings(prev => ({ ...prev, ...JSON.parse(savedSettings) }));
+        const parsedSettings = JSON.parse(savedSettings);
+        setAppSettings(prev => ({ ...prev, ...parsedSettings }));
       }
     } catch (error) {
       console.error('加载设置失败:', error);
     }
   };
 
-  const saveSettings = async (newSettings) => {
+  const saveSettings = async (newSettings: Partial<AppSettings>): Promise<void> => {
     try {
       const updatedSettings = { ...appSettings, ...newSettings };
       setAppSettings(updatedSettings);
@@ -518,26 +682,31 @@ const App = () => {
     }
   };
 
-  const loadConfiguration = async () => {
+  const loadConfiguration = async (): Promise<void> => {
     try {
       const savedConfig = await AsyncStorage.getItem('dayTimeConfig');
       if (savedConfig) {
         const config = JSON.parse(savedConfig);
-        setMajorBlocks(config.majorBlocks);
-        setTimeBlocks(config.timeBlocks);
-        dayTimeManager.setMajorBlocks(config.majorBlocks);
-        initializeAllSessions(config.timeBlocks);
-        setIsFirstTime(false);
+        if (config.majorBlocks && config.timeBlocks) {
+          setMajorBlocks(config.majorBlocks);
+          setTimeBlocks(config.timeBlocks);
+          dayTimeManager.setMajorBlocks(config.majorBlocks);
+          initializeAllSessions(config.timeBlocks);
+          setIsFirstTime(false);
+        } else {
+          throw new Error('配置数据格式错误');
+        }
       } else {
         setShowMajorBlockSetup(true);
       }
     } catch (error) {
       console.error('加载配置失败:', error);
+      setIsFirstTime(false);
       setShowMajorBlockSetup(true);
     }
   };
 
-  const saveConfiguration = async (majorBlocks, timeBlocks) => {
+  const saveConfiguration = async (majorBlocks: TimeBlock[], timeBlocks: TimeBlock[]): Promise<void> => {
     try {
       const config = { majorBlocks, timeBlocks };
       await AsyncStorage.setItem('dayTimeConfig', JSON.stringify(config));
@@ -546,19 +715,19 @@ const App = () => {
     }
   };
 
-  const applyTemplate = (template) => {
+  const applyTemplate = (template: DayTemplate): void => {
     const newMajorBlocks = template.majorBlocks;
     const newTimeBlocks = template.subBlocks.reduce((acc, subBlock) => {
       const parentIndex = acc.findIndex(parent => parent.id === subBlock.parentId);
       if (parentIndex !== -1) {
         if (!acc[parentIndex].children) acc[parentIndex].children = [];
-        acc[parentIndex].children.push({
+        acc[parentIndex].children!.push({
           id: `${subBlock.parentId}_${Date.now()}_${Math.random()}`,
           ...subBlock
         });
       }
       return acc;
-    }, newMajorBlocks.map(major => ({ ...major, children: [] })));
+    }, newMajorBlocks.map(major => ({ ...major, children: [] as TimeBlock[] })));
 
     setMajorBlocks(newMajorBlocks);
     setTimeBlocks(newTimeBlocks);
@@ -569,7 +738,7 @@ const App = () => {
     setIsFirstTime(false);
   };
 
-  const initializeAllSessions = (blocks) => {
+  const initializeAllSessions = (blocks: TimeBlock[]): void => {
     blocks.forEach(parentBlock => {
       if (parentBlock.children) {
         parentBlock.children.forEach(childBlock => {
@@ -580,12 +749,14 @@ const App = () => {
   };
 
   // ============================================================================
-  // ⏰ 增强的计时器逻辑
+  // ⏰ 增强的计时器逻辑（修复版）
   // ============================================================================
 
-  const startTimers = () => {
+  const startTimers = useCallback(() => {
+    // 清理现有定时器
+    cleanupTimers();
+    
     // 主逻辑计时器 - 每分钟更新
-    if (timerRef.current) BackgroundTimer.clearInterval(timerRef.current);
     timerRef.current = BackgroundTimer.setInterval(() => {
       if (isRunning && currentSessionId && !isPaused) {
         const currentRemainingTime = dayTimeManager.getCurrentRemainingTime(currentSessionId);
@@ -595,18 +766,23 @@ const App = () => {
       }
     }, 60000);
 
-    // 显示更新计时器 - 根据设置频率更新
-    if (displayTimerRef.current) clearInterval(displayTimerRef.current);
+    // 显示更新计时器 - 每秒更新（修复：实时显示秒数）
     displayTimerRef.current = setInterval(() => {
-      // 强制重新渲染以更新显示
       if (isRunning || isPaused) {
-        // 触发重新渲染
-        setCurrentSessionId(prev => prev); // 触发状态更新
+        setCurrentSeconds(prev => prev + 1);
+        forceUpdate(); // 触发进度条动画更新
       }
-    }, appSettings.updateInterval * 1000);
-  };
+    }, 1000);
+  }, [isRunning, currentSessionId, isPaused, cleanupTimers, forceUpdate]);
 
-  const startSession = (block) => {
+  // 修复：当相关状态变化时重新启动定时器
+  useEffect(() => {
+    if (!isFirstTime) {
+      startTimers();
+    }
+  }, [startTimers, isFirstTime]);
+
+  const startSession = (block: TimeBlock): void => {
     const session = dayTimeManager.initializeSession(block);
     const startedSession = dayTimeManager.startSession(block.id);
     
@@ -619,19 +795,28 @@ const App = () => {
       const endTime = Date.now() + (startedSession.remainingTime * 60000);
       notificationManager.scheduleBlockEnd(block.name, endTime, block.id);
       
+      // 添加声音和震动反馈
+      if (appSettings.soundEnabled) {
+        notificationManager.playSound(appSettings.soundType);
+      }
       if (appSettings.vibrationEnabled) {
-        notificationManager.vibrate('start');
+        notificationManager.vibrate('start', appSettings.vibrationPattern);
       }
     }
   };
 
-  const pauseCurrentSession = () => {
+  const pauseCurrentSession = (): void => {
     if (currentSessionId && !isPaused) {
-      setPauseDestinationSelection(true);
+      // 修复：如果有默认暂停目标，直接使用
+      if (appSettings.defaultPauseDestination) {
+        confirmPause(appSettings.defaultPauseDestination);
+      } else {
+        setPauseDestinationSelection(true);
+      }
     }
   };
 
-  const confirmPause = (destinationBlockId) => {
+  const confirmPause = (destinationBlockId: string): void => {
     if (currentSessionId) {
       const result = dayTimeManager.pauseSession(currentSessionId, destinationBlockId);
       if (result) {
@@ -640,19 +825,23 @@ const App = () => {
         
         notificationManager.cancelNotification(`block_end_${currentSessionId}`);
         
+        // 播放声音和震动反馈
+        if (appSettings.soundEnabled) {
+          notificationManager.playSound(appSettings.soundType);
+        }
+        if (appSettings.vibrationEnabled) {
+          notificationManager.vibrate('pause', appSettings.vibrationPattern);
+        }
+        
         Alert.alert(
           '会话已暂停',
-          `${result.session.name} 已暂停\n工作了 ${result.activeTime} 分钟\n暂停时间将计入: ${result.targetBlock?.name}`
+          `${result.session.name} 已暂停\n工作了 ${result.activeTime} 分钟\n暂停时间将计入: ${result.targetBlock?.name || '未知'}`
         );
-        
-        if (appSettings.vibrationEnabled) {
-          notificationManager.vibrate('pause');
-        }
       }
     }
   };
 
-  const resumeCurrentSession = () => {
+  const resumeCurrentSession = (): void => {
     if (currentSessionId && isPaused) {
       const pauseDuration = dayTimeManager.endPauseTime(currentSessionId);
       const session = dayTimeManager.startSession(currentSessionId);
@@ -664,20 +853,24 @@ const App = () => {
         const endTime = Date.now() + (session.remainingTime * 60000);
         notificationManager.scheduleBlockEnd(session.name, endTime, session.id);
         
+        // 添加声音和震动反馈
+        if (appSettings.soundEnabled) {
+          notificationManager.playSound(appSettings.soundType);
+        }
+        if (appSettings.vibrationEnabled) {
+          notificationManager.vibrate('start', appSettings.vibrationPattern);
+        }
+        
         Alert.alert(
           '会话已恢复',
-          `暂停了 ${pauseDuration} 分钟\n已计入 ${dayTimeManager.pauseDestinationBlock?.name}`
+          `暂停了 ${pauseDuration} 分钟\n已计入 ${dayTimeManager.pauseDestinationBlock?.name || '未知'}`
         );
-        
-        if (appSettings.vibrationEnabled) {
-          notificationManager.vibrate('start');
-        }
       }
     }
   };
 
-  const switchToSession = (newBlock) => {
-    if (isPaused) {
+  const switchToSession = (newBlock: TimeBlock): void => {
+    if (isPaused && currentSessionId) {
       dayTimeManager.endPauseTime(currentSessionId);
     }
     
@@ -696,15 +889,19 @@ const App = () => {
       const endTime = Date.now() + (result.newSession.remainingTime * 60000);
       notificationManager.scheduleBlockEnd(newBlock.name, endTime, newBlock.id);
       
-      Alert.alert('会话切换成功', `已切换到 ${newBlock.name}`);
-      
-      if (appSettings.vibrationEnabled) {
-        notificationManager.vibrate('switch');
+      // 添加声音和震动反馈
+      if (appSettings.soundEnabled) {
+        notificationManager.playSound(appSettings.soundType);
       }
+      if (appSettings.vibrationEnabled) {
+        notificationManager.vibrate('switch', appSettings.vibrationPattern);
+      }
+      
+      Alert.alert('会话切换成功', `已切换到 ${newBlock.name}`);
     }
   };
 
-  const finishCurrentSession = () => {
+  const finishCurrentSession = (): void => {
     if (currentSessionId) {
       if (isPaused) {
         dayTimeManager.endPauseTime(currentSessionId);
@@ -717,30 +914,35 @@ const App = () => {
       setCurrentSessionId(null);
       setIsPaused(false);
       
+      // 添加声音和震动反馈
       if (appSettings.soundEnabled) {
         notificationManager.sendImmediateNotification(
           '🎉 时间块完成！',
-          `${session?.name} 已完成`
+          `${session?.name || '未知任务'} 已完成`
         );
+      }
+      if (appSettings.vibrationEnabled) {
+        notificationManager.vibrate('complete', appSettings.vibrationPattern);
       }
       
       Alert.alert(
         '🎉 时间块完成！',
-        `${session?.name} 已完成\n工作时间：${session?.totalUsedTime} 分钟\n暂停时间：${session?.totalPauseTime} 分钟`
+        `${session?.name || '未知任务'} 已完成\n工作时间：${session?.totalUsedTime || 0} 分钟\n暂停时间：${session?.totalPauseTime || 0} 分钟`
       );
-      
-      if (appSettings.vibrationEnabled) {
-        notificationManager.vibrate('complete');
-      }
     }
   };
 
   // ============================================================================
-  // 🎨 时间块管理增强
+  // 🎨 时间块管理增强（修复版）
   // ============================================================================
 
-  const addChildBlock = (parentId) => {
-    const newChild = {
+  const addChildBlock = (parentId: string): void => {
+    if (!newBlockName.trim()) {
+      Alert.alert('提示', '请输入时间块名称');
+      return;
+    }
+
+    const newChild: TimeBlock = {
       id: `child_${Date.now()}_${Math.random()}`,
       name: newBlockName,
       icon: newBlockIcon,
@@ -764,7 +966,7 @@ const App = () => {
     closeModal();
   };
 
-  const deleteTimeBlock = (blockId, parentId) => {
+  const deleteTimeBlock = (blockId: string, parentId: string): void => {
     Alert.alert(
       '确认删除',
       appSettings.autoRedistribute ? 
@@ -779,7 +981,7 @@ const App = () => {
             let deletedDuration = 0;
             
             const updatedBlocks = timeBlocks.map(block => {
-              if (block.id === parentId) {
+              if (block.id === parentId && block.children) {
                 const deletedChild = block.children.find(child => child.id === blockId);
                 deletedDuration = deletedChild ? deletedChild.duration : 0;
                 
@@ -788,18 +990,20 @@ const App = () => {
                 // 如果启用自动重分配且还有其他子项目
                 if (appSettings.autoRedistribute && newChildren.length > 0 && deletedDuration > 0) {
                   const totalCurrentTime = newChildren.reduce((sum, child) => sum + child.duration, 0);
-                  newChildren.forEach(child => {
-                    const proportion = child.duration / totalCurrentTime;
-                    const additionalTime = Math.floor(deletedDuration * proportion);
-                    child.duration += additionalTime;
-                    
-                    // 同步更新session数据
-                    const session = dayTimeManager.sessions.get(child.id);
-                    if (session) {
-                      session.duration += additionalTime;
-                      session.remainingTime += additionalTime;
-                    }
-                  });
+                  if (totalCurrentTime > 0) {
+                    newChildren.forEach(child => {
+                      const proportion = child.duration / totalCurrentTime;
+                      const additionalTime = Math.floor(deletedDuration * proportion);
+                      child.duration += additionalTime;
+                      
+                      // 同步更新session数据
+                      const session = dayTimeManager.sessions.get(child.id);
+                      if (session) {
+                        session.duration += additionalTime;
+                        session.remainingTime += additionalTime;
+                      }
+                    });
+                  }
                 }
                 
                 return { ...block, children: newChildren };
@@ -819,13 +1023,13 @@ const App = () => {
     );
   };
 
-  const createTempBlock = () => {
+  const createTempBlock = (): void => {
     if (!newBlockName.trim()) {
       Alert.alert('提示', '请输入时间块名称');
       return;
     }
 
-    const tempBlock = {
+    const tempBlock: TimeBlock = {
       id: `temp_${Date.now()}`,
       name: newBlockName,
       duration: newBlockDuration,
@@ -854,40 +1058,40 @@ const App = () => {
     Alert.alert('临时时间块已创建', `${newBlockName} (${newBlockDuration}分钟)`);
   };
 
-  const resetTimeBlock = (blockId) => {
+  const resetTimeBlock = (blockId: string): void => {
     dayTimeManager.resetSession(blockId);
+    forceUpdate(); // 触发重新渲染
     Alert.alert('重置完成', '时间块已重置到初始状态');
   };
 
-  const toggleParentBlockCollapse = (parentId) => {
+  const toggleParentBlockCollapse = (parentId: string): void => {
     const currentState = dayTimeManager.getCollapseState(parentId);
     dayTimeManager.setCollapseState(parentId, !currentState);
-    // 触发重新渲染
-    setTimeBlocks([...timeBlocks]);
+    forceUpdate(); // 触发重新渲染
   };
 
-  const closeModal = () => {
+  const closeModal = (): void => {
     setModalVisible(false);
     setModalType(null);
     setEditingBlock(null);
     setNewBlockName('');
     setNewBlockIcon('⭐');
-    setNewBlockColor('#667eea');
+    setNewBlockColor('#7C3AED');
     setNewBlockDuration(60);
   };
 
   // ============================================================================
-  // 🎨 工具函数
+  // 🎨 工具函数（修复版）
   // ============================================================================
 
-  const formatTime = (minutes) => {
+  const formatTime = (minutes: number): string => {
     if (minutes < 60) return `${minutes}分钟`;
     const hours = Math.floor(minutes / 60);
     const mins = minutes % 60;
     return mins > 0 ? `${hours}小时${mins}分钟` : `${hours}小时`;
   };
 
-  const formatTimeWithSeconds = (minutes, seconds = 0) => {
+  const formatTimeWithSeconds = (minutes: number, seconds = 0): string => {
     if (appSettings.showSeconds) {
       if (minutes < 60) {
         return `${minutes}:${seconds.toString().padStart(2, '0')}`;
@@ -901,24 +1105,24 @@ const App = () => {
     }
   };
 
-  const getCurrentDisplayTime = () => {
+  const getCurrentDisplayTime = (): string => {
     if (!currentSessionId) return '00:00';
     
     if (isPaused) {
       const pauseTime = dayTimeManager.getCurrentPauseTime(currentSessionId);
-      return formatTimeWithSeconds(pauseTime);
+      return formatTimeWithSeconds(pauseTime.minutes, pauseTime.seconds);
     }
     
     if (appSettings.countDirection === 'down') {
       const remaining = dayTimeManager.getCurrentRemainingTime(currentSessionId);
-      return formatTimeWithSeconds(remaining);
+      return formatTimeWithSeconds(remaining.minutes, remaining.seconds);
     } else {
       const elapsed = dayTimeManager.getCurrentElapsedTime(currentSessionId);
-      return formatTimeWithSeconds(elapsed);
+      return formatTimeWithSeconds(elapsed.minutes, elapsed.seconds);
     }
   };
 
-  const getCurrentSessionDisplayName = () => {
+  const getCurrentSessionDisplayName = (): string => {
     if (!currentSessionId) return '';
     
     const session = dayTimeManager.sessions.get(currentSessionId);
@@ -931,17 +1135,18 @@ const App = () => {
     return session.name;
   };
 
-  const getProgressPercentage = () => {
+  const getProgressPercentage = (): number => {
     if (!currentSessionId) return 0;
     
     const session = dayTimeManager.sessions.get(currentSessionId);
     if (!session) return 0;
     
     const elapsed = dayTimeManager.getCurrentElapsedTime(currentSessionId);
-    return Math.min((elapsed / session.duration) * 100, 100);
+    const totalElapsedMinutes = elapsed.minutes + elapsed.seconds / 60; // 包含秒数的精确计算
+    return Math.min((totalElapsedMinutes / session.duration) * 100, 100);
   };
 
-  const renderProgressBar = (current, total, color) => (
+  const renderProgressBar = (current: number, total: number, color: string) => (
     <View style={styles.progressContainer}>
       <View style={styles.progressTrack}>
         <View 
@@ -958,7 +1163,7 @@ const App = () => {
   );
 
   // ============================================================================
-  // 🎨 渲染组件
+  // 🎨 渲染组件（部分修复）
   // ============================================================================
 
   const renderCurrentSession = () => {
@@ -979,7 +1184,10 @@ const App = () => {
             <Text style={styles.sessionTime}>{getCurrentDisplayTime()}</Text>
             {!isPaused && (
               <Text style={styles.sessionElapsed}>
-                已用: {formatTime(dayTimeManager.getCurrentElapsedTime(currentSessionId))}
+                已用: {(() => {
+                  const elapsed = dayTimeManager.getCurrentElapsedTime(currentSessionId);
+                  return formatTime(elapsed.minutes);
+                })()}
               </Text>
             )}
           </View>
@@ -1024,14 +1232,13 @@ const App = () => {
         {majorBlocks.map(block => {
           const consumed = block.consumedTime || 0;
           const remaining = block.duration - consumed;
-          const progress = (consumed / block.duration) * 100;
 
           return (
             <View key={block.id} style={[styles.majorBlockCard, { borderLeftColor: block.color }]}>
               <View style={styles.majorBlockHeader}>
                 <Text style={styles.majorBlockName}>{block.name}</Text>
                 <Text style={styles.majorBlockTime}>
-                  {formatTime(remaining)} / {formatTime(block.duration)}
+                  {formatTime(consumed)} / {formatTime(block.duration)}
                 </Text>
               </View>
               {renderProgressBar(consumed, block.duration, block.color)}
@@ -1045,7 +1252,7 @@ const App = () => {
   const renderTimeBlockSelector = () => {
     if (isFirstTime) return null;
 
-    const allBlocks = [];
+    const allBlocks: Array<TimeBlock & { remainingTime: number; isActive: boolean }> = [];
     timeBlocks.forEach(parentBlock => {
       if (parentBlock.children) {
         parentBlock.children.forEach(child => {
@@ -1240,8 +1447,8 @@ const App = () => {
     );
   };
 
-  const renderActivityLogItem = ({ item }) => {
-    const typeColors = {
+  const renderActivityLogItem = ({ item }: { item: ActivityLog }) => {
+    const typeColors: Record<ActivityLog['type'], string> = {
       start: '#4CAF50',
       pause: '#FF9800',
       switch: '#2196F3',
@@ -1250,7 +1457,7 @@ const App = () => {
       major_block_consume: '#FF5722',
     };
 
-    const typeIcons = {
+    const typeIcons: Record<ActivityLog['type'], string> = {
       start: '▶️',
       pause: '⏸️',
       switch: '🔄',
@@ -1281,7 +1488,12 @@ const App = () => {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+      <StatusBar 
+        barStyle="light-content" 
+        backgroundColor="transparent"
+        translucent={true}
+        hidden={false}
+      />
       
       {/* 顶部控制栏 */}
       <View style={styles.header}>
@@ -1338,8 +1550,16 @@ const App = () => {
 
       {/* 暂停目标选择模态框 */}
       <Modal visible={pauseDestinationSelection} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+        <TouchableOpacity 
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setPauseDestinationSelection(false)}
+        >
+          <TouchableOpacity 
+            activeOpacity={1}
+            onPress={(e) => e.stopPropagation()}
+            style={styles.modalContent}
+          >
             <Text style={styles.modalTitle}>暂停时间计入哪里？</Text>
             <Text style={styles.modalSubtitle}>选择暂停时间应该从哪个时间块中扣除</Text>
             
@@ -1347,13 +1567,23 @@ const App = () => {
               <TouchableOpacity
                 key={block.id}
                 onPress={() => confirmPause(block.id)}
+                onLongPress={() => {
+                  // 长按设置为默认选择
+                  saveSettings({ defaultPauseDestination: block.id });
+                  Alert.alert('已设为默认', `今后暂停将默认计入: ${block.name}`);
+                  confirmPause(block.id);
+                }}
                 style={[styles.destinationOption, { borderColor: block.color }]}
               >
                 <Text style={[styles.destinationName, { color: block.color }]}>
                   {block.name}
+                  {appSettings.defaultPauseDestination === block.id && ' (默认)'}
                 </Text>
                 <Text style={styles.destinationInfo}>
                   剩余: {formatTime(block.duration - (block.consumedTime || 0))}
+                </Text>
+                <Text style={styles.destinationHint}>
+                  长按设为默认选择
                 </Text>
               </TouchableOpacity>
             ))}
@@ -1364,16 +1594,48 @@ const App = () => {
             >
               <Text style={styles.cancelButtonText}>取消</Text>
             </TouchableOpacity>
-          </View>
-        </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
 
       {/* 设置模态框 */}
       <Modal visible={showSettings} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+        <TouchableOpacity 
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowSettings(false)}
+        >
+          <TouchableOpacity 
+            activeOpacity={1}
+            onPress={(e) => e.stopPropagation()}
+            style={styles.modalContent}
+          >
             <Text style={styles.modalTitle}>应用设置</Text>
             
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>主题模式</Text>
+              <View style={styles.settingButtons}>
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.theme === 'light' && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ theme: 'light' })}
+                >
+                  <Text style={styles.settingButtonText}>浅色</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.theme === 'dark' && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ theme: 'dark' })}
+                >
+                  <Text style={styles.settingButtonText}>深色</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.theme === 'auto' && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ theme: 'auto' })}
+                >
+                  <Text style={styles.settingButtonText}>自动</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
             <View style={styles.settingItem}>
               <Text style={styles.settingLabel}>计时方向</Text>
               <View style={styles.settingButtons}>
@@ -1394,6 +1656,51 @@ const App = () => {
                   }}
                 >
                   <Text style={styles.settingButtonText}>正计时</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>震动强度</Text>
+              <View style={styles.settingButtons}>
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.vibrationPattern === 'light' && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ vibrationPattern: 'light' })}
+                >
+                  <Text style={styles.settingButtonText}>轻</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.vibrationPattern === 'medium' && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ vibrationPattern: 'medium' })}
+                >
+                  <Text style={styles.settingButtonText}>中</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.vibrationPattern === 'strong' && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ vibrationPattern: 'strong' })}
+                >
+                  <Text style={styles.settingButtonText}>强</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>默认暂停目标</Text>
+              <View style={styles.settingButtons}>
+                {majorBlocks.map(block => (
+                  <TouchableOpacity
+                    key={block.id}
+                    style={[styles.settingButton, appSettings.defaultPauseDestination === block.id && styles.settingButtonActive]}
+                    onPress={() => saveSettings({ defaultPauseDestination: block.id })}
+                  >
+                    <Text style={styles.settingButtonText}>{block.name}</Text>
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity
+                  style={[styles.settingButton, appSettings.defaultPauseDestination === null && styles.settingButtonActive]}
+                  onPress={() => saveSettings({ defaultPauseDestination: null })}
+                >
+                  <Text style={styles.settingButtonText}>每次选择</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1468,8 +1775,8 @@ const App = () => {
                 <Text style={styles.saveButtonText}>完成</Text>
               </TouchableOpacity>
             </View>
-          </View>
-        </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
 
       {/* 添加时间块模态框 */}
@@ -1533,7 +1840,7 @@ const App = () => {
                 <Text style={styles.cancelButtonText}>取消</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                onPress={() => addChildBlock(editingBlock.parentId)} 
+                onPress={() => editingBlock && addChildBlock(editingBlock.parentId)} 
                 style={styles.saveButton}
               >
                 <Text style={styles.saveButtonText}>添加</Text>
@@ -1657,7 +1964,7 @@ const styles = StyleSheet.create({
   },
   header: {
     backgroundColor: '#1a1a2e',
-    paddingTop: 40,
+    paddingTop: 50, // 增加顶部padding适应透明状态栏
     paddingBottom: 15,
     paddingHorizontal: 20,
     flexDirection: 'row',
@@ -2076,6 +2383,12 @@ const styles = StyleSheet.create({
   destinationInfo: {
     fontSize: 12,
     color: '#888',
+  },
+  destinationHint: {
+    fontSize: 10,
+    color: '#666',
+    fontStyle: 'italic',
+    marginTop: 2,
   },
   settingItem: {
     flexDirection: 'row',
