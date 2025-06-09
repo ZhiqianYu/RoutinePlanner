@@ -17,6 +17,7 @@ interface TimeBlocksListProps {
   onDeleteBlock: (blockId: string, parentId: string) => void;
   onBlockPress: (block: TimeBlock) => void;
   onBlockLongPress: (block: TimeBlock) => void;
+  onEditChildBlock?: (block: TimeBlock, parentId: string) => void;
 }
 
 export const TimeBlocksList: React.FC<TimeBlocksListProps> = ({
@@ -31,21 +32,17 @@ export const TimeBlocksList: React.FC<TimeBlocksListProps> = ({
   onDeleteBlock,
   onBlockPress,
   onBlockLongPress,
+  onEditChildBlock,
 }) => {
   return (
     <View>
       {timeBlocks.map(parentBlock => {
         const isCollapsed = getCollapseState(parentBlock.id);
-        const hasActiveChild = parentBlock.children?.some(child => child.id === currentSessionId);
-        
-        const shouldCollapse = appSettings.autoCollapse && currentSessionId && !hasActiveChild;
-        const actuallyCollapsed = shouldCollapse || isCollapsed;
 
         return (
           <View key={parentBlock.id} style={[
             styles.parentBlock,
-            hasActiveChild && styles.activeParentBlock,
-            actuallyCollapsed && styles.collapsedParentBlock
+            isCollapsed && styles.collapsedParentBlock
           ]}>
             <TouchableOpacity
               onPress={() => onToggleCollapse(parentBlock.id)}
@@ -54,25 +51,27 @@ export const TimeBlocksList: React.FC<TimeBlocksListProps> = ({
               <View style={styles.parentBlockTitle}>
                 <Text style={styles.parentIcon}>{parentBlock.icon || '📁'}</Text>
                 <Text style={styles.parentName}>{parentBlock.name}</Text>
+              </View>
+              <View style={styles.parentBlockActions}>
                 <Text style={[
                   styles.collapseIndicator, 
-                  actuallyCollapsed && styles.collapseIndicatorCollapsed
+                  isCollapsed && styles.collapseIndicatorCollapsed
                 ]}>
                   ▼
                 </Text>
+                <TouchableOpacity
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    onAddChild(parentBlock.id);
+                  }}
+                  style={styles.addChildButton}
+                >
+                  <Text style={styles.addChildButtonText}>+ 添加</Text>
+                </TouchableOpacity>
               </View>
-              <TouchableOpacity
-                onPress={(e) => {
-                  e.stopPropagation();
-                  onAddChild(parentBlock.id);
-                }}
-                style={styles.addChildButton}
-              >
-                <Text style={styles.addChildButtonText}>+ 添加</Text>
-              </TouchableOpacity>
             </TouchableOpacity>
 
-            {!actuallyCollapsed && (
+            {!isCollapsed && (
               <View style={styles.childrenContainer}>
                 {parentBlock.children?.map(childBlock => {
                   const session = getSession(childBlock.id);
@@ -97,7 +96,23 @@ export const TimeBlocksList: React.FC<TimeBlocksListProps> = ({
                       <TouchableOpacity
                         style={styles.childContent}
                         onPress={() => onBlockPress(childBlock)}
-                        onLongPress={() => onBlockLongPress(childBlock)}
+                        onLongPress={() => {
+                          Alert.alert(
+                            childBlock.name,
+                            '选择操作',
+                            [
+                              { 
+                                text: '编辑', 
+                                onPress: () => onEditChildBlock?.(childBlock, parentBlock.id) 
+                              },
+                              { 
+                                text: '重置', 
+                                onPress: () => onBlockLongPress(childBlock) 
+                              },
+                              { text: '取消', style: 'cancel' }
+                            ]
+                          );
+                        }}
                       >
                         <Text style={styles.childIcon}>{childBlock.icon}</Text>
                         <View style={styles.childInfo}>

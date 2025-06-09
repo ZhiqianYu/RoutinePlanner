@@ -1,7 +1,9 @@
 // src/components/SettingsModal.tsx
-import React from 'react';
+import React, { useRef } from 'react';
 import { Modal, View, Text, TouchableOpacity, Switch } from 'react-native';
 import { AppSettings, TimeBlock } from '../types';
+import { NotificationManager } from '../managers';
+import { SOUND_TYPES, SOUND_CATEGORIES, VIBRATION_CATEGORIES } from '../constants';
 import { styles } from '../styles';
 
 interface SettingsModalProps {
@@ -21,10 +23,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSettingChange,
   onShowActivityLog,
 }) => {
+  const notificationManager = useRef(new NotificationManager()).current;
+
   const renderSettingButtons = (
     currentValue: any,
     options: Array<{ value: any; label: string }>,
-    onChange: (value: any) => void
+    onChange: (value: any) => void,
+    onPreview?: (value: any) => void
   ) => (
     <View style={styles.settingButtons}>
       {options.map(option => (
@@ -34,13 +39,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             styles.settingButton,
             currentValue === option.value && styles.settingButtonActive
           ]}
-          onPress={() => onChange(option.value)}
+          onPress={() => {
+            onChange(option.value);
+            onPreview?.(option.value);
+          }}
         >
           <Text style={styles.settingButtonText}>{option.label}</Text>
         </TouchableOpacity>
       ))}
     </View>
   );
+
+  const handleVibrationPatternChange = (pattern: string) => {
+    onSettingChange('vibrationPattern', pattern);
+    // 预览震动效果
+    notificationManager.vibrate('start', pattern);
+  };
+
+  const handleSoundTypeChange = (soundType: string) => {
+    onSettingChange('soundType', soundType);
+    // 预览声音效果
+    notificationManager.playSound(soundType);
+  };
+
+  const handleSwitchChange = (key: keyof AppSettings, value: boolean) => {
+    onSettingChange(key, value);
+    
+    // 根据开关类型提供反馈
+    if (key === 'soundEnabled') {
+      if (value && settings.soundEnabled !== value) {
+        notificationManager.playSound(settings.soundType);
+      }
+    } else if (key === 'vibrationEnabled') {
+      if (value && settings.vibrationEnabled !== value) {
+        notificationManager.vibrate('start', settings.vibrationPattern);
+      }
+    }
+  };
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
@@ -56,19 +91,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         >
           <Text style={styles.modalTitle}>应用设置</Text>
           
-          <View style={styles.settingItem}>
-            <Text style={styles.settingLabel}>主题模式</Text>
-            {renderSettingButtons(
-              settings.theme,
-              [
-                { value: 'light', label: '浅色' },
-                { value: 'dark', label: '深色' },
-                { value: 'auto', label: '自动' }
-              ],
-              (value) => onSettingChange('theme', value)
-            )}
-          </View>
-
           <View style={styles.settingItem}>
             <Text style={styles.settingLabel}>计时方向</Text>
             {renderSettingButtons(
@@ -90,7 +112,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 { value: 'medium', label: '中' },
                 { value: 'strong', label: '强' }
               ],
-              (value) => onSettingChange('vibrationPattern', value)
+              (value) => onSettingChange('vibrationPattern', value),
+              handleVibrationPatternChange
+            )}
+          </View>
+
+          <View style={styles.settingItem}>
+            <Text style={styles.settingLabel}>声音类型</Text>
+            {renderSettingButtons(
+              settings.soundType,
+              Object.entries(SOUND_TYPES).map(([key, value]) => ({
+                value: key,
+                label: value.name
+              })),
+              handleSoundTypeChange
             )}
           </View>
 
@@ -110,7 +145,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Text style={styles.settingLabel}>显示秒数</Text>
             <Switch
               value={settings.showSeconds}
-              onValueChange={(value) => onSettingChange('showSeconds', value)}
+              onValueChange={(value) => handleSwitchChange('showSeconds', value)}
             />
           </View>
 
@@ -118,7 +153,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Text style={styles.settingLabel}>自动折叠</Text>
             <Switch
               value={settings.autoCollapse}
-              onValueChange={(value) => onSettingChange('autoCollapse', value)}
+              onValueChange={(value) => handleSwitchChange('autoCollapse', value)}
             />
           </View>
 
@@ -126,15 +161,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Text style={styles.settingLabel}>显示24小时分配</Text>
             <Switch
               value={settings.showMajorBlocks}
-              onValueChange={(value) => onSettingChange('showMajorBlocks', value)}
-            />
-          </View>
-
-          <View style={styles.settingItem}>
-            <Text style={styles.settingLabel}>焦点模式</Text>
-            <Switch
-              value={settings.focusMode}
-              onValueChange={(value) => onSettingChange('focusMode', value)}
+              onValueChange={(value) => handleSwitchChange('showMajorBlocks', value)}
             />
           </View>
 
@@ -142,7 +169,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Text style={styles.settingLabel}>声音提醒</Text>
             <Switch
               value={settings.soundEnabled}
-              onValueChange={(value) => onSettingChange('soundEnabled', value)}
+              onValueChange={(value) => handleSwitchChange('soundEnabled', value)}
             />
           </View>
 
@@ -150,7 +177,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Text style={styles.settingLabel}>震动提醒</Text>
             <Switch
               value={settings.vibrationEnabled}
-              onValueChange={(value) => onSettingChange('vibrationEnabled', value)}
+              onValueChange={(value) => handleSwitchChange('vibrationEnabled', value)}
             />
           </View>
 
@@ -158,7 +185,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Text style={styles.settingLabel}>删除后重分配时间</Text>
             <Switch
               value={settings.autoRedistribute}
-              onValueChange={(value) => onSettingChange('autoRedistribute', value)}
+              onValueChange={(value) => handleSwitchChange('autoRedistribute', value)}
             />
           </View>
 

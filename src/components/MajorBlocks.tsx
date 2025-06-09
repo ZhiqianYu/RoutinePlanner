@@ -1,6 +1,6 @@
 // src/components/MajorBlocks.tsx
 import React from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, TouchableOpacity } from 'react-native';
 import { TimeBlock } from '../types';
 import { styles } from '../styles';
 import { formatTime, calculateProgress } from '../utils';
@@ -9,9 +9,14 @@ import { ProgressBar } from './ProgressBar';
 interface MajorBlocksProps {
   blocks: TimeBlock[];
   visible: boolean;
+  onLongPress?: (block: TimeBlock) => void;
 }
 
-export const MajorBlocks: React.FC<MajorBlocksProps> = ({ blocks, visible }) => {
+export const MajorBlocks: React.FC<MajorBlocksProps> = ({ 
+  blocks, 
+  visible, 
+  onLongPress 
+}) => {
   if (!visible) return null;
 
   return (
@@ -22,7 +27,12 @@ export const MajorBlocks: React.FC<MajorBlocksProps> = ({ blocks, visible }) => 
         const progress = calculateProgress(consumed, block.duration);
 
         return (
-          <View key={block.id} style={[styles.majorBlockCard, { borderLeftColor: block.color }]}>
+          <TouchableOpacity
+            key={block.id}
+            onLongPress={() => onLongPress?.(block)}
+            style={[styles.majorBlockCard, { borderLeftColor: block.color }]}
+            activeOpacity={0.7}
+          >
             <View style={styles.majorBlockHeader}>
               <Text style={styles.majorBlockName}>{block.name}</Text>
               <Text style={styles.majorBlockTime}>
@@ -35,7 +45,7 @@ export const MajorBlocks: React.FC<MajorBlocksProps> = ({ blocks, visible }) => 
               color={block.color}
               progress={progress}
             />
-          </View>
+          </TouchableOpacity>
         );
       })}
     </View>

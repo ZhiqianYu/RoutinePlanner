@@ -6,3 +6,5 @@ export { ProgressBar } from './ProgressBar';
 export { SettingsModal } from './SettingsModal';
 export { TimeBlocksList } from './TimeBlocksList';
 export { ActivityLog } from './ActivityLog';
+export { FocusButton } from './FocusButton';
+export { FocusMode } from './FocusMode';

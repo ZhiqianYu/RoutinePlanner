@@ -270,7 +270,7 @@ export const useTimeBlocks = () => {
   }, [loadConfiguration]);
 
   return {
-    majorBlocks,
+    majorBlocks: dayTimeManager.getMajorBlocks(),
     timeBlocks,
     isLoading,
     isFirstTime,

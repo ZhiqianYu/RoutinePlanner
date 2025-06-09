@@ -26,6 +26,45 @@ export class DayTimeManager {
   }
 
   /**
+   * 更新主要时间块的已用时间统计
+   */
+  private updateMajorBlocksConsumedTime(): void {
+    this.majorBlocks.forEach(majorBlock => {
+      let totalConsumed = 0;
+      
+      // 计算所有子时间块的已用时间
+      this.sessions.forEach(session => {
+        // 如果是工作类型的主块，累计所有工作相关会话的已用时间
+        if (majorBlock.type === 'work' || majorBlock.name.includes('工作') || majorBlock.name.includes('清醒')) {
+          if (!this.isRestSession(session)) {
+            totalConsumed += session.totalUsedTime;
+          }
+        }
+        // 如果是休息/睡眠类型的主块，累计休息相关会话的已用时间和所有暂停时间
+        else if (majorBlock.type === 'rest' || majorBlock.name.includes('休息') || majorBlock.name.includes('睡眠')) {
+          if (this.isRestSession(session)) {
+            totalConsumed += session.totalUsedTime;
+          }
+          // 添加所有会话的暂停时间
+          totalConsumed += session.totalPauseTime;
+        }
+      });
+      
+      majorBlock.consumedTime = totalConsumed;
+    });
+  }
+
+  /**
+   * 判断是否为休息类型的会话
+   */
+  private isRestSession(session: Session): boolean {
+    return session.name.includes('休息') || 
+           session.name.includes('睡眠') || 
+           session.name.includes('放松') ||
+           session.name.includes('娱乐');
+  }
+
+  /**
    * 初始化会话
    */
   initializeSession(block: TimeBlock): Session {
@@ -94,6 +133,9 @@ export class DayTimeManager {
     
     session.currentPauseTarget = targetBlock;
     
+    // 更新主要时间块统计
+    this.updateMajorBlocksConsumedTime();
+    
     this.logActivity('pause', 
       `暂停 ${session.name}，时间将计入 ${targetBlock?.name || '未知'}`, 
       session.remainingTime, 
@@ -118,15 +160,14 @@ export class DayTimeManager {
     session.pauseStartTime = null;
     session.currentPauseTarget = null;
     
-    if (targetBlock) {
-      this.consumeMajorBlockTime(targetBlock.id, pauseDurationMinutes);
-    }
-    
     session.pauseHistory.push({
       duration: pauseDurationMinutes,
       timestamp: new Date(),
       targetBlock: targetBlock?.name,
     });
+    
+    // 更新主要时间块统计
+    this.updateMajorBlocksConsumedTime();
     
     this.logActivity('pause_end', 
       `结束暂停，暂停了 ${pauseDurationMinutes} 分钟，计入 ${targetBlock?.name || '未知'}`,
@@ -138,16 +179,15 @@ export class DayTimeManager {
   }
 
   /**
-   * 消耗主要时间块时间
+   * 消耗主要时间块时间（保留用于向后兼容）
    */
   consumeMajorBlockTime(blockId: string, minutes: number): void {
     const majorBlock = this.majorBlocks.find(block => block.id === blockId);
     if (majorBlock) {
-      majorBlock.consumedTime = (majorBlock.consumedTime || 0) + minutes;
-      
+      // 现在通过 updateMajorBlocksConsumedTime 自动计算，这里只记录日志
       this.logActivity('major_block_consume', 
         `${majorBlock.name} 消耗了 ${minutes} 分钟`,
-        majorBlock.duration - majorBlock.consumedTime,
+        majorBlock.duration - (majorBlock.consumedTime || 0),
         minutes
       );
     }
@@ -237,12 +277,36 @@ export class DayTimeManager {
    * 获取主要时间块状态
    */
   getMajorBlocksStatus(): Array<{ id: string; name: string; remaining: number; progressPercent: number }> {
+    // 确保统计是最新的
+    this.updateMajorBlocksConsumedTime();
+    
     return this.majorBlocks.map(block => ({
       id: block.id,
       name: block.name,
       remaining: block.duration - (block.consumedTime || 0),
       progressPercent: ((block.consumedTime || 0) / block.duration) * 100
     }));
+  }
+
+  /**
+   * 获取主要时间块（用于显示）
+   */
+  getMajorBlocks(): TimeBlock[] {
+    // 确保统计是最新的
+    this.updateMajorBlocksConsumedTime();
+    return [...this.majorBlocks];
+  }
+
+  /**
+   * 更新主要时间块信息
+   */
+  updateMajorBlock(blockId: string, updates: Partial<TimeBlock>): boolean {
+    const blockIndex = this.majorBlocks.findIndex(block => block.id === blockId);
+    if (blockIndex !== -1) {
+      this.majorBlocks[blockIndex] = { ...this.majorBlocks[blockIndex], ...updates };
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -284,6 +348,9 @@ export class DayTimeManager {
         currentPauseTarget: null,
         accumulatedTime: 0,
       });
+      
+      // 更新主要时间块统计
+      this.updateMajorBlocksConsumedTime();
     }
   }
 

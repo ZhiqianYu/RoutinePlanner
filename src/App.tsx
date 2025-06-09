@@ -1,5 +1,5 @@
-// App.tsx - 模块化重构版本
-import React, { useState, useCallback } from 'react';
+// App.tsx - 完整修正版本
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -18,14 +18,16 @@ import {
 import { TimeBlock, DayTemplate, ActivityLog } from './types';
 import { DAY_TEMPLATES, COLOR_OPTIONS, EMOJI_OPTIONS, ACTIVITY_TYPE_COLORS, ACTIVITY_TYPE_ICONS } from './constants';
 import { formatTime, formatTimeWithSeconds, calculateProgress } from './utils';
-import { useAppSettings, useTimeBlocks, useTimer } from './hooks';
+import { useAppSettings, useTimeBlocks, useTimer, useOrientation } from './hooks';
 import { 
   CurrentSession, 
   TimeBlockSelector, 
   MajorBlocks, 
   SettingsModal, 
   TimeBlocksList, 
-  ActivityLog as ActivityLogComponent 
+  ActivityLog as ActivityLogComponent,
+  FocusButton,
+  FocusMode,
 } from './components';
 import { styles } from './styles';
 
@@ -40,7 +42,8 @@ const App: React.FC = () => {
     applyTemplate, 
     addChildBlock, 
     deleteTimeBlock, 
-    createTempBlock 
+    createTempBlock,
+    updateTimeBlock
   } = useTimeBlocks();
   
   const {
@@ -63,10 +66,13 @@ const App: React.FC = () => {
     }
   });
 
+  // 屏幕方向检测
+  const isLandscape = useOrientation();
+
   // 模态框状态
   const [modalVisible, setModalVisible] = useState(false);
   const [modalType, setModalType] = useState<string | null>(null);
-  const [editingBlock, setEditingBlock] = useState<{ parentId: string } | null>(null);
+  const [editingBlock, setEditingBlock] = useState<{ parentId?: string; block?: TimeBlock } | null>(null);
   const [pauseDestinationSelection, setPauseDestinationSelection] = useState(false);
   
   // 显示状态
@@ -75,11 +81,23 @@ const App: React.FC = () => {
   const [showMajorBlockSetup, setShowMajorBlockSetup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  // 新建时间块状态
+  // 专注模式状态
+  const [focusMode, setFocusMode] = useState(false);
+
+  // 新建/编辑时间块状态
   const [newBlockName, setNewBlockName] = useState('');
   const [newBlockIcon, setNewBlockIcon] = useState('⭐');
   const [newBlockColor, setNewBlockColor] = useState('#7C3AED');
   const [newBlockDuration, setNewBlockDuration] = useState(60);
+
+  // 横屏时自动进入专注模式
+  useEffect(() => {
+    if (isLandscape && currentSessionId && !focusMode) {
+      setFocusMode(true);
+    } else if (!isLandscape && focusMode) {
+      setFocusMode(false);
+    }
+  }, [isLandscape, currentSessionId, focusMode]);
 
   // 处理模板应用
   const handleApplyTemplate = useCallback(async (template: DayTemplate) => {
@@ -97,7 +115,6 @@ const App: React.FC = () => {
     if (result) {
       setPauseDestinationSelection(false);
       
-      // 可以长按设为默认选择
       Alert.alert(
         '会话已暂停',
         `${result.session.name} 已暂停\n工作了 ${result.activeTime} 分钟\n暂停时间将计入: ${result.targetBlock?.name || '未知'}`
@@ -163,6 +180,52 @@ const App: React.FC = () => {
     }
   }, [addChildBlock, newBlockName, newBlockIcon, newBlockColor, newBlockDuration]);
 
+  // 处理编辑主要时间块
+  const handleEditMajorBlock = useCallback(async () => {
+    if (!editingBlock?.block || !newBlockName.trim()) {
+      Alert.alert('提示', '请输入时间块名称');
+      return;
+    }
+
+    try {
+      const success = dayTimeManager.updateMajorBlock(editingBlock.block.id, {
+        name: newBlockName,
+        icon: newBlockIcon,
+        duration: newBlockDuration,
+      });
+      
+      if (success) {
+        closeModal();
+        Alert.alert('修改成功', '主要时间块已更新');
+      } else {
+        Alert.alert('错误', '修改失败');
+      }
+    } catch (error) {
+      Alert.alert('错误', '修改时间块失败');
+    }
+  }, [dayTimeManager, editingBlock, newBlockName, newBlockIcon, newBlockDuration]);
+
+  // 处理编辑子时间块
+  const handleEditChildBlock = useCallback(async () => {
+    if (!editingBlock?.block || !newBlockName.trim()) {
+      Alert.alert('提示', '请输入时间块名称');
+      return;
+    }
+
+    try {
+      await updateTimeBlock(editingBlock.block.id, {
+        name: newBlockName,
+        icon: newBlockIcon,
+        color: newBlockColor,
+        duration: newBlockDuration,
+      });
+      closeModal();
+      Alert.alert('修改成功', '时间块已更新');
+    } catch (error) {
+      Alert.alert('错误', '修改时间块失败');
+    }
+  }, [updateTimeBlock, editingBlock, newBlockName, newBlockIcon, newBlockColor, newBlockDuration]);
+
   // 处理创建临时时间块
   const handleCreateTempBlock = useCallback(async () => {
     if (!newBlockName.trim()) {
@@ -199,22 +262,27 @@ const App: React.FC = () => {
     dayTimeManager.setCollapseState(parentId, !currentState);
   }, [dayTimeManager]);
 
-  // 渲染进度条
-  const renderProgressBar = useCallback((current: number, total: number, color: string) => (
-    <View style={styles.progressContainer}>
-      <View style={styles.progressTrack}>
-        <View 
-          style={[
-            styles.progressFill, 
-            { width: `${Math.min(calculateProgress(current, total), 100)}%`, backgroundColor: color }
-          ]} 
-        />
-      </View>
-      <Text style={styles.progressText}>
-        {Math.round(Math.min(calculateProgress(current, total), 100))}%
-      </Text>
-    </View>
-  ), []);
+  // 处理大模块长按编辑
+  const handleMajorBlockLongPress = useCallback((block: TimeBlock) => {
+    setEditingBlock({ block });
+    setNewBlockName(block.name);
+    setNewBlockIcon(block.icon || '⭐');
+    setNewBlockColor(block.color || '#7C3AED');
+    setNewBlockDuration(block.duration);
+    setModalType('editMajorBlock');
+    setModalVisible(true);
+  }, []);
+
+  // 处理子时间块长按编辑
+  const handleChildBlockEdit = useCallback((block: TimeBlock, parentId: string) => {
+    setEditingBlock({ block, parentId });
+    setNewBlockName(block.name);
+    setNewBlockIcon(block.icon || '⭐');
+    setNewBlockColor(block.color || '#7C3AED');
+    setNewBlockDuration(block.duration);
+    setModalType('editChildBlock');
+    setModalVisible(true);
+  }, []);
 
   // 渲染当前会话
   const renderCurrentSession = useCallback(() => {
@@ -242,132 +310,36 @@ const App: React.FC = () => {
     );
   }, [currentSessionId, dayTimeManager, getCurrentSessionDisplayName, getCurrentDisplayTime, getProgressPercentage, isPaused, isRunning, appSettings, handlePauseCurrentSession, resumeCurrentSession]);
 
-  // 渲染主要时间块
-  const renderMajorBlocks = useCallback(() => (
-    <MajorBlocks
-      blocks={majorBlocks}
-      visible={!isFirstTime && appSettings.showMajorBlocks}
-    />
-  ), [majorBlocks, isFirstTime, appSettings.showMajorBlocks]);
-
-  // 渲染时间块选择器
-  const renderTimeBlockSelector = useCallback(() => {
-    if (isFirstTime) return null;
-
-    const allBlocks: Array<TimeBlock & { remainingTime: number; isActive: boolean }> = [];
-    timeBlocks.forEach(parentBlock => {
-      if (parentBlock.children) {
-        parentBlock.children.forEach(child => {
-          const session = dayTimeManager.getSession(child.id);
-          if (session && session.remainingTime > 0) {
-            allBlocks.push({
-              ...child,
-              remainingTime: session.remainingTime,
-              isActive: session.isActive && !isPaused,
-            });
-          }
-        });
-      }
-    });
-
-    return (
-      <TimeBlockSelector
-        blocks={allBlocks}
-        currentSessionId={currentSessionId}
-        isPaused={isPaused}
-        onBlockPress={(block) => {
-          if (currentSessionId === block.id) {
-            if (isPaused) {
-              resumeCurrentSession();
-            } else {
-              handlePauseCurrentSession();
-            }
-          } else {
-            if (currentSessionId) {
-              switchToSession(block);
-            } else {
-              startSession(block);
-            }
-          }
-        }}
-        onCreateTempBlock={() => {
-          setModalType('tempBlock');
-          setModalVisible(true);
-        }}
-      />
-    );
-  }, [isFirstTime, timeBlocks, dayTimeManager, isPaused, currentSessionId, resumeCurrentSession, handlePauseCurrentSession, switchToSession, startSession]);
-
-  // 渲染时间块列表
-  const renderTimeBlocks = useCallback(() => {
-    if (isFirstTime) return null;
-
-    return (
-      <TimeBlocksList
-        timeBlocks={timeBlocks}
-        currentSessionId={currentSessionId}
-        isPaused={isPaused}
-        appSettings={appSettings}
-        getSession={(blockId) => dayTimeManager.getSession(blockId)}
-        getCollapseState={(parentId) => dayTimeManager.getCollapseState(parentId)}
-        onToggleCollapse={toggleParentBlockCollapse}
-        onAddChild={(parentId) => {
-          setModalType('addChild');
-          setEditingBlock({ parentId });
-          setModalVisible(true);
-        }}
-        onDeleteBlock={handleDeleteTimeBlock}
-        onBlockPress={(block) => {
-          if (currentSessionId === block.id) {
-            if (isPaused) {
-              resumeCurrentSession();
-            } else {
-              handlePauseCurrentSession();
-            }
-          } else {
-            if (currentSessionId) {
-              switchToSession(block);
-            } else {
-              startSession(block);
-            }
-          }
-        }}
-        onBlockLongPress={(block) => {
-          Alert.alert(
-            block.name,
-            '选择操作',
-            [
-              { text: '重置', onPress: () => resetTimeBlock(block.id) },
-              { text: '取消', style: 'cancel' }
-            ]
-          );
-        }}
-      />
-    );
-  }, [isFirstTime, timeBlocks, currentSessionId, isPaused, appSettings, dayTimeManager, toggleParentBlockCollapse, handleDeleteTimeBlock, resumeCurrentSession, handlePauseCurrentSession, switchToSession, startSession, resetTimeBlock]);
-
-  // 渲染活动日志项
-  const renderActivityLogItem = useCallback(({ item }: { item: ActivityLog }) => (
-    <View style={styles.activityLogItem}>
-      <View style={[styles.activityIcon, { backgroundColor: ACTIVITY_TYPE_COLORS[item.type] || '#666' }]}>
-        <Text style={styles.activityIconText}>{ACTIVITY_TYPE_ICONS[item.type] || '📝'}</Text>
-      </View>
-      <View style={styles.activityInfo}>
-        <Text style={styles.activityDescription}>{item.description}</Text>
-        <Text style={styles.activityTime}>
-          {item.timestamp.toLocaleTimeString()} 
-          {item.duration > 0 && ` | 时长: ${item.duration}分钟`}
-        </Text>
-      </View>
-    </View>
-  ), []);
-
   // 监听首次使用状态
   React.useEffect(() => {
     if (isFirstTime) {
       setShowMajorBlockSetup(true);
     }
   }, [isFirstTime]);
+
+  // 如果是专注模式，显示专注界面
+  if (focusMode) {
+    const session = currentSessionId ? dayTimeManager.getSession(currentSessionId) : null;
+    return (
+      <FocusMode
+        visible={focusMode}
+        session={session}
+        sessionDisplayName={getCurrentSessionDisplayName()}
+        currentDisplayTime={getCurrentDisplayTime()}
+        progressPercentage={getProgressPercentage()}
+        isPaused={isPaused}
+        isActive={isRunning}
+        appSettings={appSettings}
+        getCurrentElapsedMinutes={() => {
+          const elapsed = dayTimeManager.getCurrentElapsedTime(currentSessionId || '');
+          return elapsed.minutes;
+        }}
+        onPause={handlePauseCurrentSession}
+        onResume={resumeCurrentSession}
+        onExit={() => setFocusMode(false)}
+      />
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -396,14 +368,108 @@ const App: React.FC = () => {
 
       <ScrollView style={styles.scrollView}>
         {/* 主要时间块状态 */}
-        {renderMajorBlocks()}
+        <MajorBlocks
+          blocks={majorBlocks}
+          visible={!isFirstTime && appSettings.showMajorBlocks}
+          onLongPress={handleMajorBlockLongPress}
+        />
 
         {/* 时间块选择器 */}
-        {renderTimeBlockSelector()}
+        {!isFirstTime && (
+          <TimeBlockSelector
+            blocks={(() => {
+              const allBlocks: Array<TimeBlock & { remainingTime: number; isActive: boolean }> = [];
+              timeBlocks.forEach(parentBlock => {
+                if (parentBlock.children) {
+                  parentBlock.children.forEach(child => {
+                    const session = dayTimeManager.getSession(child.id);
+                    if (session && session.remainingTime > 0) {
+                      allBlocks.push({
+                        ...child,
+                        remainingTime: session.remainingTime,
+                        isActive: session.isActive && !isPaused,
+                      });
+                    }
+                  });
+                }
+              });
+              return allBlocks;
+            })()}
+            currentSessionId={currentSessionId}
+            isPaused={isPaused}
+            onBlockPress={(block) => {
+              if (currentSessionId === block.id) {
+                if (isPaused) {
+                  resumeCurrentSession();
+                } else {
+                  handlePauseCurrentSession();
+                }
+              } else {
+                if (currentSessionId) {
+                  switchToSession(block);
+                } else {
+                  startSession(block);
+                }
+              }
+            }}
+            onCreateTempBlock={() => {
+              setModalType('tempBlock');
+              setModalVisible(true);
+            }}
+          />
+        )}
 
         {/* 时间块列表 */}
-        {renderTimeBlocks()}
+        {!isFirstTime && (
+          <TimeBlocksList
+            timeBlocks={timeBlocks}
+            currentSessionId={currentSessionId}
+            isPaused={isPaused}
+            appSettings={appSettings}
+            getSession={(blockId) => dayTimeManager.getSession(blockId)}
+            getCollapseState={(parentId) => dayTimeManager.getCollapseState(parentId)}
+            onToggleCollapse={toggleParentBlockCollapse}
+            onAddChild={(parentId) => {
+              setModalType('addChild');
+              setEditingBlock({ parentId });
+              setModalVisible(true);
+            }}
+            onDeleteBlock={handleDeleteTimeBlock}
+            onBlockPress={(block) => {
+              if (currentSessionId === block.id) {
+                if (isPaused) {
+                  resumeCurrentSession();
+                } else {
+                  handlePauseCurrentSession();
+                }
+              } else {
+                if (currentSessionId) {
+                  switchToSession(block);
+                } else {
+                  startSession(block);
+                }
+              }
+            }}
+            onBlockLongPress={(block) => {
+              Alert.alert(
+                block.name,
+                '选择操作',
+                [
+                  { text: '重置', onPress: () => resetTimeBlock(block.id) },
+                  { text: '取消', style: 'cancel' }
+                ]
+              );
+            }}
+            onEditChildBlock={handleChildBlockEdit}
+          />
+        )}
       </ScrollView>
+
+      {/* 专注模式悬浮按钮 */}
+      <FocusButton
+        isVisible={!!currentSessionId && !isLandscape}
+        onPress={() => setFocusMode(true)}
+      />
 
       {/* 24小时模板设置模态框 */}
       <Modal visible={showMajorBlockSetup} animationType="slide">
@@ -551,10 +617,131 @@ const App: React.FC = () => {
                 <Text style={styles.cancelButtonText}>取消</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                onPress={() => editingBlock && handleAddChildBlock(editingBlock.parentId)} 
+                onPress={() => editingBlock?.parentId && handleAddChildBlock(editingBlock.parentId)} 
                 style={styles.saveButton}
               >
                 <Text style={styles.saveButtonText}>添加</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 编辑主要时间块模态框 */}
+      <Modal visible={modalType === 'editMajorBlock' && modalVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>编辑主要时间块</Text>
+            
+            <Text style={styles.inputLabel}>名称:</Text>
+            <TextInput
+              style={styles.textInput}
+              value={newBlockName}
+              onChangeText={setNewBlockName}
+              placeholder="输入时间块名称"
+              placeholderTextColor="#888"
+            />
+            
+            <Text style={styles.inputLabel}>图标:</Text>
+            <ScrollView horizontal style={styles.emojiContainer}>
+              {EMOJI_OPTIONS.map(emoji => (
+                <TouchableOpacity
+                  key={emoji}
+                  onPress={() => setNewBlockIcon(emoji)}
+                  style={[
+                    styles.emojiOption,
+                    newBlockIcon === emoji && styles.selectedEmoji
+                  ]}
+                >
+                  <Text style={styles.emojiText}>{emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            
+            <Text style={styles.inputLabel}>总时长 (分钟):</Text>
+            <TextInput
+              style={styles.textInput}
+              value={newBlockDuration.toString()}
+              onChangeText={(text) => setNewBlockDuration(parseInt(text) || 0)}
+              placeholder="输入总时长"
+              placeholderTextColor="#888"
+              keyboardType="numeric"
+            />
+            
+            <View style={styles.modalButtons}>
+              <TouchableOpacity onPress={closeModal} style={styles.cancelButton}>
+                <Text style={styles.cancelButtonText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={handleEditMajorBlock} style={styles.saveButton}>
+                <Text style={styles.saveButtonText}>保存</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 编辑子时间块模态框 */}
+      <Modal visible={modalType === 'editChildBlock' && modalVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>编辑时间块</Text>
+            
+            <Text style={styles.inputLabel}>名称:</Text>
+            <TextInput
+              style={styles.textInput}
+              value={newBlockName}
+              onChangeText={setNewBlockName}
+              placeholder="输入时间块名称"
+              placeholderTextColor="#888"
+            />
+            
+            <Text style={styles.inputLabel}>图标:</Text>
+            <ScrollView horizontal style={styles.emojiContainer}>
+              {EMOJI_OPTIONS.map(emoji => (
+                <TouchableOpacity
+                  key={emoji}
+                  onPress={() => setNewBlockIcon(emoji)}
+                  style={[
+                    styles.emojiOption,
+                    newBlockIcon === emoji && styles.selectedEmoji
+                  ]}
+                >
+                  <Text style={styles.emojiText}>{emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            
+            <Text style={styles.inputLabel}>颜色:</Text>
+            <View style={styles.colorContainer}>
+              {COLOR_OPTIONS.map(color => (
+                <TouchableOpacity
+                  key={color}
+                  onPress={() => setNewBlockColor(color)}
+                  style={[
+                    styles.colorOption,
+                    { backgroundColor: color },
+                    newBlockColor === color && styles.selectedColor
+                  ]}
+                />
+              ))}
+            </View>
+            
+            <Text style={styles.inputLabel}>时长 (分钟):</Text>
+            <TextInput
+              style={styles.textInput}
+              value={newBlockDuration.toString()}
+              onChangeText={(text) => setNewBlockDuration(parseInt(text) || 0)}
+              placeholder="输入时长"
+              placeholderTextColor="#888"
+              keyboardType="numeric"
+            />
+            
+            <View style={styles.modalButtons}>
+              <TouchableOpacity onPress={closeModal} style={styles.cancelButton}>
+                <Text style={styles.cancelButtonText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={handleEditChildBlock} style={styles.saveButton}>
+                <Text style={styles.saveButtonText}>保存</Text>
               </TouchableOpacity>
             </View>
           </View>
