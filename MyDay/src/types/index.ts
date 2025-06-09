@@ -52,9 +52,17 @@ export interface AppSettings {
   soundEnabled: boolean;
   vibrationEnabled: boolean;
   soundType: string;
-  vibrationPattern: 'light' | 'medium' | 'strong';
+  vibrationPattern: 'light' | 'medium' | 'strong' | 'custom';
   defaultPauseDestination: string | null;
   autoRedistribute: boolean;
+  
+  // 新增细分设置
+  startSoundType: string;
+  pauseSoundType: string;
+  completeSoundType: string;
+  startVibrationPattern: 'light' | 'medium' | 'strong' | 'custom';
+  pauseVibrationPattern: 'light' | 'medium' | 'strong' | 'custom';
+  completeVibrationPattern: 'light' | 'medium' | 'strong' | 'custom';
 }
 
 export interface DayTemplate {
@@ -66,4 +74,27 @@ export interface DayTemplate {
 export interface TimeDisplay {
   minutes: number;
   seconds: number;
+}
+
+// 新增主题类型
+export interface Theme {
+  background: string;
+  cardBackground: string;
+  headerBackground: string;
+  textPrimary: string;
+  textSecondary: string;
+  textMuted: string;
+  border: string;
+  success: string;
+  warning: string;
+  error: string;
+  info: string;
+  accent: string;
+}
+
+// 新增专注模式状态
+export interface FocusModeState {
+  isActive: boolean;
+  isLandscape: boolean;
+  triggeredBy: 'button' | 'orientation' | 'manual';
 }

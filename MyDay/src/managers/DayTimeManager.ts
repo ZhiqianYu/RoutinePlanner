@@ -8,6 +8,7 @@ export class DayTimeManager {
   private majorBlocks: TimeBlock[] = [];
   private pauseDestinationBlock: TimeBlock | null = null;
   private collapseStates = new Map<string, boolean>();
+  private parentChildMap = new Map<string, string[]>(); // 追踪父子关系
 
   /**
    * 设置主要时间块
@@ -15,7 +16,7 @@ export class DayTimeManager {
   setMajorBlocks(blocks: TimeBlock[]): void {
     this.majorBlocks = blocks.map(block => ({
       ...block,
-      consumedTime: block.consumedTime || 0,
+      consumedTime: 0, // 重置为0，将通过计算得出
     }));
     
     this.pauseDestinationBlock = this.majorBlocks.find(block => 
@@ -23,6 +24,60 @@ export class DayTimeManager {
       block.name.includes('休息') || 
       block.name.includes('睡眠')
     ) || this.majorBlocks[1] || null;
+  }
+
+  /**
+   * 更新父子关系映射
+   */
+  updateParentChildMap(timeBlocks: TimeBlock[]): void {
+    this.parentChildMap.clear();
+    timeBlocks.forEach(parentBlock => {
+      if (parentBlock.children) {
+        this.parentChildMap.set(parentBlock.id, parentBlock.children.map(child => child.id));
+      }
+    });
+  }
+
+  /**
+   * 计算主要时间块的实际已用时间
+   */
+  private calculateMajorBlockConsumedTime(majorBlockId: string): number {
+    let totalConsumed = 0;
+    
+    // 获取该主要时间块下的所有子时间块
+    const childIds = this.parentChildMap.get(majorBlockId) || [];
+    
+    // 累加所有子时间块的已用时间
+    childIds.forEach(childId => {
+      const session = this.sessions.get(childId);
+      if (session) {
+        totalConsumed += session.totalUsedTime;
+      }
+    });
+    
+    // 如果是休息类型的时间块，还要加上暂停时间
+    const majorBlock = this.majorBlocks.find(block => block.id === majorBlockId);
+    if (majorBlock && (majorBlock.type === 'rest' || majorBlock.name.includes('休息') || majorBlock.name.includes('睡觉'))) {
+      // 累加所有会话的暂停时间（如果选择计入此时间块）
+      Array.from(this.sessions.values()).forEach(session => {
+        session.pauseHistory.forEach(pause => {
+          if (pause.targetBlock === majorBlock.name) {
+            totalConsumed += pause.duration;
+          }
+        });
+      });
+    }
+    
+    return totalConsumed;
+  }
+
+  /**
+   * 更新所有主要时间块的已用时间
+   */
+  private updateAllMajorBlocksConsumedTime(): void {
+    this.majorBlocks.forEach(majorBlock => {
+      majorBlock.consumedTime = this.calculateMajorBlockConsumedTime(majorBlock.id);
+    });
   }
 
   /**
@@ -40,7 +95,8 @@ export class DayTimeManager {
         pauseStartTime: null,
         pauseHistory: [],
         currentPauseTarget: null,
-        accumulatedTime: 0,
+        accumulatedTime: 0, // 秒级累计时间
+        accumulatedSeconds: 0, // 新增：记录累计的秒数
       });
     }
     return this.sessions.get(block.id)!;
@@ -66,7 +122,7 @@ export class DayTimeManager {
   }
 
   /**
-   * 暂停会话
+   * 暂停会话 - 修复精度问题
    */
   pauseSession(blockId: string, destinationBlockId?: string): { 
     session: Session; 
@@ -80,9 +136,13 @@ export class DayTimeManager {
     const activeTimeMs = pauseStartTime - session.lastStartTime;
     const activeTimeSeconds = Math.floor(activeTimeMs / 1000);
     const activeTimeMinutes = Math.floor(activeTimeSeconds / 60);
+    const remainderSeconds = activeTimeSeconds % 60;
     
-    // 更新累计时间（保持分钟精度用于显示）
-    session.accumulatedTime += activeTimeMinutes;
+    // 更新累计时间（保持秒级精度）
+    session.accumulatedSeconds = (session.accumulatedSeconds || 0) + activeTimeSeconds;
+    session.accumulatedTime = Math.floor(session.accumulatedSeconds / 60); // 分钟显示
+    
+    // 更新剩余时间和已用时间
     session.remainingTime = Math.max(0, session.remainingTime - activeTimeMinutes);
     session.totalUsedTime += activeTimeMinutes;
     session.isActive = false;
@@ -93,6 +153,9 @@ export class DayTimeManager {
       this.pauseDestinationBlock;
     
     session.currentPauseTarget = targetBlock;
+    
+    // 更新主要时间块统计
+    this.updateAllMajorBlocksConsumedTime();
     
     this.logActivity('pause', 
       `暂停 ${session.name}，时间将计入 ${targetBlock?.name || '未知'}`, 
@@ -111,22 +174,23 @@ export class DayTimeManager {
     if (!session || !session.pauseStartTime) return 0;
 
     const pauseDurationMs = Date.now() - session.pauseStartTime;
-    const pauseDurationMinutes = Math.floor(pauseDurationMs / (60 * 1000));
+    const pauseDurationSeconds = Math.floor(pauseDurationMs / 1000);
+    const pauseDurationMinutes = Math.floor(pauseDurationSeconds / 60);
     const targetBlock = session.currentPauseTarget;
     
     session.totalPauseTime += pauseDurationMinutes;
     session.pauseStartTime = null;
     session.currentPauseTarget = null;
     
-    if (targetBlock) {
-      this.consumeMajorBlockTime(targetBlock.id, pauseDurationMinutes);
-    }
-    
+    // 记录暂停历史
     session.pauseHistory.push({
       duration: pauseDurationMinutes,
       timestamp: new Date(),
       targetBlock: targetBlock?.name,
     });
+    
+    // 更新主要时间块统计
+    this.updateAllMajorBlocksConsumedTime();
     
     this.logActivity('pause_end', 
       `结束暂停，暂停了 ${pauseDurationMinutes} 分钟，计入 ${targetBlock?.name || '未知'}`,
@@ -138,19 +202,12 @@ export class DayTimeManager {
   }
 
   /**
-   * 消耗主要时间块时间
+   * 已废弃 - 主要时间块时间现在通过计算得出
    */
   consumeMajorBlockTime(blockId: string, minutes: number): void {
-    const majorBlock = this.majorBlocks.find(block => block.id === blockId);
-    if (majorBlock) {
-      majorBlock.consumedTime = (majorBlock.consumedTime || 0) + minutes;
-      
-      this.logActivity('major_block_consume', 
-        `${majorBlock.name} 消耗了 ${minutes} 分钟`,
-        majorBlock.duration - majorBlock.consumedTime,
-        minutes
-      );
-    }
+    // 这个方法已废弃，因为现在通过计算子时间块来得出主要时间块的消耗
+    // 保留方法以免破坏现有调用
+    console.warn('consumeMajorBlockTime is deprecated, use updateAllMajorBlocksConsumedTime instead');
   }
 
   /**
@@ -200,7 +257,7 @@ export class DayTimeManager {
     if (session && session.isActive && session.lastStartTime) {
       const currentElapsedMs = Date.now() - session.lastStartTime;
       const currentElapsedSeconds = Math.floor(currentElapsedMs / 1000);
-      const totalSeconds = session.accumulatedTime * 60 + currentElapsedSeconds;
+      const totalSeconds = (session.accumulatedSeconds || 0) + currentElapsedSeconds;
       return {
         minutes: Math.floor(totalSeconds / 60),
         seconds: totalSeconds % 60
@@ -208,7 +265,7 @@ export class DayTimeManager {
     }
     return {
       minutes: session ? session.accumulatedTime : 0,
-      seconds: 0
+      seconds: session ? (session.accumulatedSeconds || 0) % 60 : 0
     };
   }
 
@@ -219,9 +276,9 @@ export class DayTimeManager {
     const session = this.sessions.get(blockId);
     if (session && session.isActive && session.lastStartTime) {
       const currentElapsedMs = Date.now() - session.lastStartTime;
-      const currentElapsedMinutes = Math.floor(currentElapsedMs / (60 * 1000));
-      const currentElapsedSeconds = Math.floor((currentElapsedMs % (60 * 1000)) / 1000);
-      const remainingTotalSeconds = Math.max(0, session.remainingTime * 60 - (currentElapsedMinutes * 60 + currentElapsedSeconds));
+      const currentElapsedSeconds = Math.floor(currentElapsedMs / 1000);
+      const totalElapsedSeconds = (session.accumulatedSeconds || 0) + currentElapsedSeconds;
+      const remainingTotalSeconds = Math.max(0, session.duration * 60 - totalElapsedSeconds);
       return {
         minutes: Math.floor(remainingTotalSeconds / 60),
         seconds: remainingTotalSeconds % 60
@@ -234,9 +291,12 @@ export class DayTimeManager {
   }
 
   /**
-   * 获取主要时间块状态
+   * 获取主要时间块状态 - 使用计算出的时间
    */
   getMajorBlocksStatus(): Array<{ id: string; name: string; remaining: number; progressPercent: number }> {
+    // 确保统计是最新的
+    this.updateAllMajorBlocksConsumedTime();
+    
     return this.majorBlocks.map(block => ({
       id: block.id,
       name: block.name,
@@ -283,7 +343,11 @@ export class DayTimeManager {
         pauseHistory: [],
         currentPauseTarget: null,
         accumulatedTime: 0,
+        accumulatedSeconds: 0,
       });
+      
+      // 更新主要时间块统计
+      this.updateAllMajorBlocksConsumedTime();
     }
   }
 
@@ -295,7 +359,7 @@ export class DayTimeManager {
   }
 
   /**
-   * 获取每日统计
+   * 获取每日统计 - 使用修正后的时间计算
    */
   getDailyStats() {
     const todayLogs = this.activityLog.filter(log => isToday(log.timestamp));
@@ -303,6 +367,9 @@ export class DayTimeManager {
     const completedTasks = todayLogs.filter(log => log.type === 'complete').length;
     const switchCount = todayLogs.filter(log => log.type === 'switch').length;
     const pauseCount = todayLogs.filter(log => log.type === 'pause').length;
+    
+    // 确保统计是最新的
+    this.updateAllMajorBlocksConsumedTime();
     
     const totalActiveTime = Array.from(this.sessions.values())
       .reduce((sum, session) => sum + session.totalUsedTime, 0);
@@ -353,5 +420,13 @@ export class DayTimeManager {
    */
   getPauseDestinationBlock(): TimeBlock | null {
     return this.pauseDestinationBlock;
+  }
+
+  /**
+   * 获取主要时间块（确保统计最新）
+   */
+  getMajorBlocks(): TimeBlock[] {
+    this.updateAllMajorBlocksConsumedTime();
+    return [...this.majorBlocks];
   }
 }
