@@ -6,6 +6,24 @@ const {getDefaultConfig, mergeConfig} = require('@react-native/metro-config');
  *
  * @type {import('metro-config').MetroConfig}
  */
-const config = {};
+const config = {
+  transformer: {
+    minifierConfig: {
+      // 减少变量声明警告
+      mangle: {
+        keep_fnames: true,
+      },
+      compress: {
+        drop_console: false,
+      },
+    },
+  },
+  resolver: {
+    // 确保正确解析模块
+    alias: {
+      '@': './src',
+    },
+  },
+};
 
 module.exports = mergeConfig(getDefaultConfig(__dirname), config);
